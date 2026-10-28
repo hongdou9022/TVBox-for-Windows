@@ -12,6 +12,9 @@ public static class OmniConfig
     const string KToken = "omni_token";
     const string KUid = "omni_uid";
     const string KUser = "omni_user";
+    const string KScopeType = "omni_search_scope_type";
+    const string KScopeId = "omni_search_scope_id";
+    const string KScopeName = "omni_search_scope_name";
 
     /// <summary>规范化地址：补 http://、去尾部斜杠。</summary>
     public static string Normalize(string input)
@@ -50,6 +53,32 @@ public static class OmniConfig
 
     public static bool IsLoggedIn =>
         !string.IsNullOrEmpty(BaseUrl) && !string.IsNullOrEmpty(Token);
+
+    /// <summary>搜索范围：空=全站，site=指定站点，spider=指定爬虫。</summary>
+    public static string SearchScopeType
+    {
+        get => Setting.GetString(KScopeType);
+        set => Setting.Put(KScopeType, value ?? "");
+    }
+
+    public static string SearchScopeId
+    {
+        get => Setting.GetString(KScopeId);
+        set => Setting.Put(KScopeId, value ?? "");
+    }
+
+    public static string SearchScopeName
+    {
+        get => Setting.GetString(KScopeName);
+        set => Setting.Put(KScopeName, value ?? "");
+    }
+
+    public static void SetSearchScope(string type, string id, string name)
+    {
+        SearchScopeType = type;
+        SearchScopeId = id;
+        SearchScopeName = name;
+    }
 
     public static void SaveSession(string baseUrl, string userName, string token, string userId)
     {

@@ -48,7 +48,7 @@ public sealed class LocalSiteEngine
         await gate.WaitAsync();
         try
         {
-            return await SearchSiteCoreAsync(site, keyword, page);
+            return (await SearchSiteCoreAsync(site, keyword, page)).Items;
         }
         finally
         {
@@ -56,37 +56,79 @@ public sealed class LocalSiteEngine
         }
     }
 
-    async Task<List<OmniApi.OmniItem>> SearchSiteCoreAsync(OmniApi.OmniLocalSite site, string keyword, int page)
+    async Task<(List<OmniApi.OmniItem> Items, string Error)> SearchSiteCoreAsync(OmniApi.OmniLocalSite site, string keyword, int page)
     {
         lock (_cooldown)
         {
             if (_cooldown.TryGetValue(site.Id, out var until) && until > Environment.TickCount64)
-                return new();
+                return (new(), "");
         }
+        var responded = false;
+        var lastError = "";
         foreach (var variant in SearchVariants(keyword, page))
         {
             try
             {
                 var json = await RequestAsync(site, variant, SearchSiteTimeoutMs);
-                if (json?["list"] is not JsonArray list || list.Count == 0) continue;
+                if (json == null)
+                {
+                    lastError = "接口无响应";
+                    continue;
+                }
+                if (json["list"] is not JsonArray list)
+                {
+                    lastError = "返回格式异常";
+                    continue;
+                }
+                responded = true;
+                if (list.Count == 0) continue;
                 lock (_cooldown) _cooldown.Remove(site.Id);
-                return ParseItems(site, list);
+                return (ParseItems(site, list), "");
             }
             catch (Exception e)
             {
+                lastError = DescribeError(e);
                 Logger.E(Tag, "search " + site.Name + ": " + e.Message);
             }
         }
+        if (responded)
+        {
+            lock (_cooldown) _cooldown.Remove(site.Id);
+            return (new(), "");
+        }
         lock (_cooldown) _cooldown[site.Id] = Environment.TickCount64 + CooldownMs;
-        return new();
+        return (new(), string.IsNullOrEmpty(lastError) ? "请求失败" : lastError);
     }
 
-    /// <summary>全站搜索：全部启用站点，按动态评分排序 + 缓存命中优先 + 滑动窗口逐源回调。</summary>
-    public async Task SearchStreamingAsync(string keyword, int page, Action<OmniApi.OmniLocalSite, List<OmniApi.OmniItem>> onSite, CancellationToken ct = default)
+    static string DescribeError(Exception e) => e switch
+    {
+        TimeoutException or TaskCanceledException => "超时",
+        HttpRequestException http => http.Message.StartsWith("HTTP ", StringComparison.Ordinal) ? http.Message : "连接失败",
+        _ => "请求失败",
+    };
+
+    /// <summary>当前搜索范围下的站点（全站/指定站点）；范围菜单只影响这里，不影响默认全站。</summary>
+    public List<OmniApi.OmniLocalSite> ScopedSites()
     {
         var sources = LocalSourceStore.Instance.Cached;
-        var ordered = (sources?.Sites ?? new())
-            .Where(site => !string.IsNullOrEmpty(site?.Api) && !IsCooling(site.Id))
+        var sites = (sources?.Sites ?? new())
+            .Where(site => !string.IsNullOrEmpty(site?.Id) && !string.IsNullOrEmpty(site.Api) && !IsCooling(site.Id))
+            .ToList();
+        var scopeType = OmniConfig.SearchScopeType;
+        if (scopeType == "site" && !string.IsNullOrEmpty(OmniConfig.SearchScopeId))
+            sites = sites.Where(site => site.Id == OmniConfig.SearchScopeId).ToList();
+        else if (scopeType == "spider")
+            sites = new();
+        return sites;
+    }
+
+    /// <summary>全站搜索：全部启用站点，按动态评分排序 + 缓存命中优先 + 滑动窗口逐源回调。
+    /// 回调第三参为缓存命中标记；失败源通过 onFailure 上报名称与原因。</summary>
+    public async Task SearchStreamingAsync(string keyword, int page,
+        Action<OmniApi.OmniLocalSite, List<OmniApi.OmniItem>, bool> onSite,
+        Action<string, string> onFailure = null, CancellationToken ct = default)
+    {
+        var ordered = ScopedSites()
             .OrderByDescending(site => OmniSourceScoreStore.EffectiveScore(site.Id, false))
             .ThenByDescending(site => site.Priority)
             .ThenBy(site => OmniSourceScoreStore.Latency(site.Id, false))
@@ -98,53 +140,89 @@ public sealed class LocalSiteEngine
         foreach (var site in ordered)
         {
             if (TryGetStreamCache(StreamCacheKey(site, keyword, page), out var cached) && cached.Count > 0)
-                onSite(site, cached);
+                onSite(site, cached, true);
             else
                 queue.Enqueue(site);
         }
         if (queue.Count == 0) return;
 
         var userConcurrency = Setting.GetInt("omni_concurrency");
-        var concurrency = userConcurrency > 0 ? userConcurrency : Math.Max(12, sources.Concurrency);
-        concurrency = Math.Clamp(concurrency, 1, 16);
+        var serverConcurrency = LocalSourceStore.Instance.Cached?.Concurrency ?? 8;
+        var autoConcurrency = Math.Min(serverConcurrency > 0 ? serverConcurrency : 8, OmniConcurrencyTuner.Current);
+        var concurrency = Math.Clamp(userConcurrency > 0 ? userConcurrency : autoConcurrency, 1, 16);
 
         using var windowCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         windowCts.CancelAfter(SearchStreamDeadlineMs);
+        var stats = new RunStats();
         var running = new HashSet<Task>();
         while ((queue.Count > 0 || running.Count > 0) && !windowCts.IsCancellationRequested)
         {
             while (running.Count < concurrency && queue.Count > 0 && !windowCts.IsCancellationRequested)
             {
                 var site = queue.Dequeue();
-                running.Add(RunSiteAsync(site, keyword, page, onSite, windowCts.Token));
+                running.Add(RunSiteAsync(site, keyword, page, onSite, onFailure, stats, windowCts.Token));
             }
             if (running.Count == 0) break;
             var completed = await Task.WhenAny(running);
             running.Remove(completed);
         }
         windowCts.Cancel();
+        stats.Report();
+    }
+
+    sealed class RunStats
+    {
+        int _attempted;
+        int _succeeded;
+        long _latencySum;
+
+        public void Add(bool success, long latencyMs)
+        {
+            Interlocked.Increment(ref _attempted);
+            if (success) Interlocked.Increment(ref _succeeded);
+            Interlocked.Add(ref _latencySum, Math.Max(0, latencyMs));
+        }
+
+        public void Report()
+        {
+            var attempted = Volatile.Read(ref _attempted);
+            if (attempted == 0) return;
+            var succeeded = Volatile.Read(ref _succeeded);
+            var avgLatency = Volatile.Read(ref _latencySum) / (double)attempted;
+            OmniConcurrencyTuner.Record(attempted, succeeded, avgLatency);
+        }
     }
 
     async Task RunSiteAsync(OmniApi.OmniLocalSite site, string keyword, int page,
-        Action<OmniApi.OmniLocalSite, List<OmniApi.OmniItem>> onSite, CancellationToken token)
+        Action<OmniApi.OmniLocalSite, List<OmniApi.OmniItem>, bool> onSite,
+        Action<string, string> onFailure, RunStats stats, CancellationToken token)
     {
         var watch = System.Diagnostics.Stopwatch.StartNew();
         try
         {
-            var items = await SearchSiteCoreAsync(site, keyword, page);
+            var (items, error) = await SearchSiteCoreAsync(site, keyword, page);
             watch.Stop();
+            stats.Add(string.IsNullOrEmpty(error), watch.ElapsedMilliseconds);
+            if (!string.IsNullOrEmpty(error))
+            {
+                OmniSourceScoreStore.Record(site.Id, site.Name, false, watch.ElapsedMilliseconds, 0, false);
+                if (!token.IsCancellationRequested) onFailure?.Invoke(site.Name, error);
+                return;
+            }
             OmniSourceScoreStore.Record(site.Id, site.Name, false, watch.ElapsedMilliseconds, items.Count, true);
             if (items.Count > 0)
             {
                 PutStreamCache(StreamCacheKey(site, keyword, page), items);
-                if (!token.IsCancellationRequested) onSite(site, items);
+                if (!token.IsCancellationRequested) onSite(site, items, false);
             }
         }
         catch (Exception e)
         {
             watch.Stop();
+            stats.Add(false, watch.ElapsedMilliseconds);
             OmniSourceScoreStore.Record(site.Id, site.Name, false, watch.ElapsedMilliseconds, 0, false);
             Logger.E(Tag, "stream " + site.Name + ": " + e.Message);
+            if (!token.IsCancellationRequested) onFailure?.Invoke(site.Name, DescribeError(e));
         }
     }
 
@@ -266,7 +344,8 @@ public sealed class LocalSiteEngine
             ["Accept"] = "application/json, text/plain, */*",
         };
         var response = await HttpUtil.Get(site.Api, headers, query, timeoutMs);
-        if (response.Code < 200 || response.Code >= 300) return null;
+        if (response.Code < 200 || response.Code >= 300)
+            throw new HttpRequestException("HTTP " + response.Code);
         var text = response.Text(CharsetOf(response)).Trim().TrimStart('\uFEFF');
         if (!text.StartsWith('{')) return null;
         return JsonUtil.Parse(text) as JsonObject;

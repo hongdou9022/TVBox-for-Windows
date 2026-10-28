@@ -86,11 +86,27 @@ public sealed class LocalSpiderEngine
             .ToList();
     }
 
-    /// <summary>全站爬虫搜索：按动态评分排序 + 缓存命中优先 + 滑动窗口逐源回调。</summary>
-    public async Task SearchStreamingAsync(string keyword, int page, Action<OmniApi.OmniLocalSpider, List<OmniApi.OmniItem>> onSpider, CancellationToken ct = default)
+    /// <summary>当前搜索范围下的爬虫（全站/指定爬虫）；范围菜单只影响这里，不影响默认全站。</summary>
+    public List<OmniApi.OmniLocalSpider> ScopedSpiders()
     {
-        var ordered = EnabledSpiders()
+        var spiders = EnabledSpiders()
             .Where(spider => !IsCooling(spider.Id))
+            .ToList();
+        var scopeType = OmniConfig.SearchScopeType;
+        if (scopeType == "spider" && !string.IsNullOrEmpty(OmniConfig.SearchScopeId))
+            spiders = spiders.Where(spider => spider.Id == OmniConfig.SearchScopeId).ToList();
+        else if (scopeType == "site")
+            spiders = new();
+        return spiders;
+    }
+
+    /// <summary>全站爬虫搜索：按动态评分排序 + 缓存命中优先 + 滑动窗口逐源回调。
+    /// 回调第三参为缓存命中标记；失败源通过 onFailure 上报名称与原因。</summary>
+    public async Task SearchStreamingAsync(string keyword, int page,
+        Action<OmniApi.OmniLocalSpider, List<OmniApi.OmniItem>, bool> onSpider,
+        Action<string, string> onFailure = null, CancellationToken ct = default)
+    {
+        var ordered = ScopedSpiders()
             .OrderByDescending(spider => OmniSourceScoreStore.EffectiveScore(spider.Id, true))
             .ThenByDescending(spider => spider.Priority)
             .ThenBy(spider => OmniSourceScoreStore.Latency(spider.Id, true))
@@ -102,7 +118,7 @@ public sealed class LocalSpiderEngine
         foreach (var spider in ordered)
         {
             if (TryGetStreamCache(StreamCacheKey(spider, keyword, page), out var cached) && cached.Count > 0)
-                onSpider(spider, cached);
+                onSpider(spider, cached, true);
             else
                 queue.Enqueue(spider);
         }
@@ -119,7 +135,7 @@ public sealed class LocalSpiderEngine
             while (running.Count < concurrency && queue.Count > 0 && !windowCts.IsCancellationRequested)
             {
                 var spider = queue.Dequeue();
-                running.Add(RunSpiderAsync(spider, keyword, page, onSpider, windowCts.Token));
+                running.Add(RunSpiderAsync(spider, keyword, page, onSpider, onFailure, windowCts.Token));
             }
             if (running.Count == 0) break;
             var completed = await Task.WhenAny(running);
@@ -129,18 +145,25 @@ public sealed class LocalSpiderEngine
     }
 
     async Task RunSpiderAsync(OmniApi.OmniLocalSpider spider, string keyword, int page,
-        Action<OmniApi.OmniLocalSpider, List<OmniApi.OmniItem>> onSpider, CancellationToken token)
+        Action<OmniApi.OmniLocalSpider, List<OmniApi.OmniItem>, bool> onSpider,
+        Action<string, string> onFailure, CancellationToken token)
     {
         var watch = System.Diagnostics.Stopwatch.StartNew();
         try
         {
-            var items = await SearchOneAsync(spider, keyword, page);
+            var (items, error) = await SearchOneOutcomeAsync(spider, keyword, page);
             watch.Stop();
+            if (!string.IsNullOrEmpty(error))
+            {
+                OmniSourceScoreStore.Record(spider.Id, spider.Name, true, watch.ElapsedMilliseconds, 0, false);
+                if (!token.IsCancellationRequested) onFailure?.Invoke(spider.Name, error);
+                return;
+            }
             OmniSourceScoreStore.Record(spider.Id, spider.Name, true, watch.ElapsedMilliseconds, items.Count, true);
             if (items.Count > 0)
             {
                 PutStreamCache(StreamCacheKey(spider, keyword, page), items);
-                if (!token.IsCancellationRequested) onSpider(spider, items);
+                if (!token.IsCancellationRequested) onSpider(spider, items, false);
             }
         }
         catch (Exception e)
@@ -148,6 +171,7 @@ public sealed class LocalSpiderEngine
             watch.Stop();
             OmniSourceScoreStore.Record(spider.Id, spider.Name, true, watch.ElapsedMilliseconds, 0, false);
             Logger.E(Tag, "stream " + spider.Name + ": " + e.Message);
+            if (!token.IsCancellationRequested) onFailure?.Invoke(spider.Name, "脚本报错");
         }
     }
 
@@ -188,35 +212,56 @@ public sealed class LocalSpiderEngine
         }
     }
 
-    async Task<List<OmniApi.OmniItem>> SearchOneAsync(OmniApi.OmniLocalSpider spider, string keyword, int page)
+    async Task<List<OmniApi.OmniItem>> SearchOneAsync(OmniApi.OmniLocalSpider spider, string keyword, int page) =>
+        (await SearchOneOutcomeAsync(spider, keyword, page)).Items;
+
+    async Task<(List<OmniApi.OmniItem> Items, string Error)> SearchOneOutcomeAsync(OmniApi.OmniLocalSpider spider, string keyword, int page)
     {
         lock (_cooldown)
         {
             if (_cooldown.TryGetValue(spider.Id, out var until) && until > Environment.TickCount64)
-                return new();
+                return (new(), "");
         }
         try
         {
             var runtime = await RuntimeAsync(spider);
-            if (runtime == null) return new();
+            if (runtime == null)
+            {
+                lock (_cooldown) _cooldown[spider.Id] = Environment.TickCount64 + CooldownMs;
+                return (new(), "脚本不可用");
+            }
             var call = runtime.CallAsync("search", new Dictionary<string, string>
             {
                 ["keyword"] = keyword,
                 ["wd"] = keyword,
                 ["page"] = Math.Max(1, page).ToString(),
             });
-            var json = await call.WaitAsync(TimeSpan.FromSeconds(6));
-            if (string.IsNullOrEmpty(json)) return new();
-            if (JsonUtil.Parse(json) is not JsonObject root || root["list"] is not JsonArray list) return new();
+            string json;
+            try { json = await call.WaitAsync(TimeSpan.FromSeconds(6)); }
+            catch (TimeoutException)
+            {
+                lock (_cooldown) _cooldown[spider.Id] = Environment.TickCount64 + CooldownMs;
+                return (new(), "超时");
+            }
+            if (string.IsNullOrEmpty(json))
+            {
+                lock (_cooldown) _cooldown[spider.Id] = Environment.TickCount64 + CooldownMs;
+                return (new(), "脚本无返回");
+            }
+            if (JsonUtil.Parse(json) is not JsonObject root || root["list"] is not JsonArray list)
+            {
+                lock (_cooldown) _cooldown[spider.Id] = Environment.TickCount64 + CooldownMs;
+                return (new(), "返回格式异常");
+            }
             var items = ParseItems(spider, list);
             lock (_cooldown) _cooldown.Remove(spider.Id);
-            return items;
+            return (items, "");
         }
         catch (Exception e)
         {
             Logger.E(Tag, "search " + spider.Name + ": " + e.Message);
             lock (_cooldown) _cooldown[spider.Id] = Environment.TickCount64 + CooldownMs;
-            return new();
+            return (new(), "脚本报错");
         }
     }
 

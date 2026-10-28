@@ -11,7 +11,7 @@
                                  Pic="{Binding Pic}"
                                  Title="{Binding Title}"
                                  Remark="{Binding Remark}"
-                                 Source="{Binding SourceName}"/>
+                                 Source="{Binding SourceText}"/>
         </DataTemplate>
         <DataTemplate x:Key="GroupedCardTemplate">
             <Button Background="Transparent" BorderThickness="0" Padding="0" Click="OnGroupedResultClick">
@@ -19,7 +19,7 @@
                                      Pic="{Binding Pic}"
                                      Title="{Binding Title}"
                                      Remark="{Binding Remark}"
-                                     Source="{Binding SourceName}"/>
+                                     Source="{Binding SourceText}"/>
             </Button>
         </DataTemplate>
     </Page.Resources>
@@ -54,9 +54,15 @@
             <AutoSuggestBox x:Name="SearchBox"
                             Width="360"
                             QueryIcon="Find"
-                            PlaceholderText="输入关键词搜索全部站点"
+                            PlaceholderText="输入关键词搜索影片"
+                            TextChanged="OnSearchTextChanged"
                             QuerySubmitted="OnQuerySubmitted"/>
             <Button x:Name="CancelButton" Content="取消" Visibility="Collapsed" Click="OnCancel"/>
+            <ComboBox x:Name="ScopeCombo"
+                      MinWidth="150"
+                      VerticalAlignment="Center"
+                      ToolTipService.ToolTip="搜索范围：全站或指定站点/爬虫"
+                      SelectionChanged="OnScopeChanged"/>
             <TextBlock x:Name="ScopeText"
                        VerticalAlignment="Center"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
@@ -77,8 +83,11 @@
             <Button Grid.Column="1" Content="清空" Margin="8,0,0,0" Click="OnClearHistory"/>
         </Grid>
 
-        <!-- 搜索中进度 -->
-        <ProgressBar x:Name="SearchProgress" Grid.Row="3" IsIndeterminate="True" Visibility="Collapsed" Margin="0,12,0,0"/>
+        <!-- 搜索中进度 + 失败源聚合入口 -->
+        <StackPanel Grid.Row="3" Orientation="Horizontal" Spacing="12" Margin="0,12,0,0">
+            <ProgressBar x:Name="SearchProgress" Width="240" IsIndeterminate="True" Visibility="Collapsed"/>
+            <Button x:Name="FailureButton" Visibility="Collapsed" Click="OnShowFailures"/>
+        </StackPanel>
 
         <!-- 站点横排：滚轮在此区域转换为横向滚动。 -->
         <ListView x:Name="SiteList"

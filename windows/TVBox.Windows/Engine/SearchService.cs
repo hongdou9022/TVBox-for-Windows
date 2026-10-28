@@ -9,18 +9,20 @@ public class SearchService
     /// <summary>并行搜索所有可搜站点；每站完成即回调（UI 线程）。keyword 自动繁→简。
     /// 并发度 = Environment.ProcessorCount，单站超时用 site.RequestTimeout，空结果不回调。</summary>
     /// <summary>首页搜索（page=1）。</summary>
-    public static Task SearchAll(string keyword, bool quick, Action<Models.Site, List<Models.Vod>> onSiteResult, CancellationToken ct)
-        => SearchPage(keyword, quick, "1", onSiteResult, ct);
+    public static Task SearchAll(string keyword, bool quick, Action<Models.Site, List<Models.Vod>> onSiteResult, CancellationToken ct,
+        Action<OmniSearchStatus> onStatus = null)
+        => SearchPage(keyword, quick, "1", onSiteResult, ct, onStatus);
 
     /// <summary>分页搜索：搜索页“加载更多”用 page&gt;1 调用。并行搜索全部可搜站点，逐站回调。</summary>
-    public static async Task SearchPage(string keyword, bool quick, string page, Action<Models.Site, List<Models.Vod>> onSiteResult, CancellationToken ct)
+    public static async Task SearchPage(string keyword, bool quick, string page, Action<Models.Site, List<Models.Vod>> onSiteResult, CancellationToken ct,
+        Action<OmniSearchStatus> onStatus = null)
     {
         keyword = Core.Trans.T2S(keyword);
         var sites = VodConfigService.Instance.Sites.Where(s => quick ? s.IsQuickSearch : s.IsSearchable).ToList();
         if (sites.Count == 0) return;
         if (sites.Count == 1 && string.Equals(sites[0].Api, "omni", StringComparison.OrdinalIgnoreCase))
         {
-            await OmniSearchService.SearchStreamingAsync(keyword, page, onSiteResult, ct);
+            await OmniSearchService.SearchStreamingAsync(keyword, page, onSiteResult, ct, onStatus);
             return;
         }
         using var gate = new SemaphoreSlim(Environment.ProcessorCount);

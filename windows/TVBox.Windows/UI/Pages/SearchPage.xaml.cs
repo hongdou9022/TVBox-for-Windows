@@ -24,6 +24,8 @@ public sealed partial class SearchPage : Page
     int _page = 1;
     bool _loadingMore;
     bool _end;
+    bool _suppressScopeChange;
+    OmniSearchStatus _lastStatus;
 
     public SearchPage()
     {
@@ -39,6 +41,7 @@ public sealed partial class SearchPage : Page
         BackButton.Visibility = Frame.CanGoBack ? Visibility.Visible : Visibility.Collapsed;
         RefreshDisplayStyle();
         UpdateScope();
+        _ = LoadScopeOptionsAsync(e.NavigationMode != NavigationMode.Back);
         LoadChips();
         if (e.Parameter is string keyword && !string.IsNullOrWhiteSpace(keyword))
         {
@@ -52,13 +55,57 @@ public sealed partial class SearchPage : Page
         }
     }
 
+    async Task LoadScopeOptionsAsync(bool force)
+    {
+        try
+        {
+            if (OmniConfig.IsLoggedIn) await LocalSourceStore.Instance.SyncAsync(force);
+        }
+        catch (Exception e) { Logger.E("SearchPage.scope", e.Message); }
+
+        var options = OmniSearchService.ScopeOptions();
+        var current = options.FirstOrDefault(option =>
+                          option.Type == OmniConfig.SearchScopeType && option.Id == OmniConfig.SearchScopeId)
+                      ?? options[0];
+        if (current.Type != OmniConfig.SearchScopeType || current.Id != OmniConfig.SearchScopeId)
+            OmniConfig.SetSearchScope(current.Type, current.Id, current.Name);
+
+        _suppressScopeChange = true;
+        ScopeCombo.ItemsSource = options;
+        ScopeCombo.SelectedItem = current;
+        _suppressScopeChange = false;
+        UpdateScope();
+    }
+
+    void OnScopeChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressScopeChange || ScopeCombo.SelectedItem is not OmniScopeOption option) return;
+        OmniConfig.SetSearchScope(option.Type, option.Id, option.Name);
+        UpdateScope();
+        var keyword = string.IsNullOrWhiteSpace(SearchBox.Text) ? _lastKeyword : SearchBox.Text;
+        if (!string.IsNullOrWhiteSpace(keyword)) StartSearch(keyword);
+    }
+
     void UpdateScope()
     {
-        var count = VodConfigService.Instance.Sites.Count(s => s.IsSearchable && !s.IsHidden);
-        ScopeText.Text = count > 0 ? $"将搜索 {count} 个站点" : "暂无可搜索站点";
+        if (!string.IsNullOrEmpty(OmniConfig.SearchScopeType))
+        {
+            ScopeText.Text = $"仅搜索 {OmniConfig.SearchScopeName}";
+            return;
+        }
+        var sites = LocalSiteEngine.Instance.ScopedSites().Count;
+        var spiders = LocalSpiderEngine.Instance.ScopedSpiders().Count;
+        ScopeText.Text = sites + spiders > 0 ? $"将搜索 {sites} 站点 + {spiders} 爬虫" : "暂无可搜索源";
     }
 
     void OnQuerySubmitted(AutoSuggestBox sender, AutoSuggestBoxQuerySubmittedEventArgs args) => StartSearch(args.QueryText);
+
+    void OnSearchTextChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args)
+    {
+        if (args.Reason != AutoSuggestionBoxTextChangeReason.UserInput) return;
+        var text = (sender.Text ?? "").Trim();
+        sender.ItemsSource = text.Length >= 2 ? OmniTitleIndex.Suggest(text) : null;
+    }
 
     async void StartSearch(string keyword)
     {
@@ -84,9 +131,11 @@ public sealed partial class SearchPage : Page
         EmptyText.Visibility = Visibility.Collapsed;
         SearchProgress.Visibility = Visibility.Visible;
         CancelButton.Visibility = Visibility.Visible;
+        _lastStatus = null;
+        FailureButton.Visibility = Visibility.Collapsed;
         try
         {
-            // 每站完成即回调（契约 §2.5：回调已切 UI 线程，空结果不回调）
+            // 每源完成即回调（回调已切 UI 线程，空结果不回调）
             await SearchService.SearchAll(keyword, false, (site, list) =>
             {
                 if (cts.IsCancellationRequested) return;
@@ -100,11 +149,17 @@ public sealed partial class SearchPage : Page
                         SourcePriority = site.SourcePriority,
                         SiteKey = site.Key,
                         VodId = v.Id,
+                        FromCache = site.FromCache,
                     })
                     .ToList();
                 _allItems.AddRange(items);
                 RebuildGroups();
-            }, cts.Token);
+            }, cts.Token, status =>
+            {
+                if (cts.IsCancellationRequested) return;
+                _lastStatus = status;
+                UpdateFailureButton();
+            });
         }
         catch (Exception e) { Logger.E("SearchPage", e.Message); }
         finally
@@ -145,6 +200,7 @@ public sealed partial class SearchPage : Page
                         SourcePriority = site.SourcePriority,
                         SiteKey = site.Key,
                         VodId = v.Id,
+                        FromCache = site.FromCache,
                     })
                     .Where(item => !_allItems.Any(existing =>
                         (existing.SiteKey == item.SiteKey && existing.VodId == item.VodId) ||
@@ -215,6 +271,46 @@ public sealed partial class SearchPage : Page
         if (index > 0) return value[..index];
         index = value.IndexOf(" +", StringComparison.Ordinal);
         return index > 0 ? value[..index] : value;
+    }
+
+    void UpdateFailureButton()
+    {
+        var count = _lastStatus?.Failures.Count ?? 0;
+        if (count == 0)
+        {
+            FailureButton.Visibility = Visibility.Collapsed;
+            return;
+        }
+        FailureButton.Content = $"{count} 个源失败，查看详情";
+        FailureButton.Visibility = Visibility.Visible;
+    }
+
+    async void OnShowFailures(object sender, RoutedEventArgs e)
+    {
+        var failures = _lastStatus?.Failures;
+        if (failures == null || failures.Count == 0) return;
+        var text = string.Join("\n", failures
+            .OrderBy(failure => failure.SourceType)
+            .ThenBy(failure => failure.Name)
+            .Select(failure =>
+                $"{failure.Name}（{(failure.SourceType == "spider" ? "爬虫" : "站点")}）：{failure.Reason}"));
+        var dialog = new ContentDialog
+        {
+            Title = $"失败的源（{failures.Count}/{_lastStatus.SearchedSources}）",
+            Content = new ScrollViewer
+            {
+                MaxHeight = 420,
+                Content = new TextBlock
+                {
+                    Text = text,
+                    TextWrapping = TextWrapping.Wrap,
+                    IsTextSelectionEnabled = true,
+                },
+            },
+            CloseButtonText = "关闭",
+            XamlRoot = XamlRoot,
+        };
+        await dialog.ShowAsync();
     }
 
     void OnCancel(object sender, RoutedEventArgs e) => _cts?.Cancel();
@@ -330,4 +426,8 @@ public class VodItem
     public string SiteKey { get; set; }
     public string VodId { get; set; }
     public string Action { get; set; }
+    public bool FromCache { get; set; }
+    public string SourceText => FromCache && !string.IsNullOrEmpty(SourceName)
+        ? SourceName + " · 缓存"
+        : SourceName;
 }
