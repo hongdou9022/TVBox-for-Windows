@@ -15,11 +15,14 @@ public sealed class LocalSiteEngine
     const int DetailTimeoutMs = 6000;
     const long DetailTtlMs = 2 * 60 * 1000;
     const long CooldownMs = 5 * 60 * 1000;
+    const long StreamCacheTtlMs = 2 * 60 * 1000;
+    const int StreamCacheMax = 200;
 
     public static LocalSiteEngine Instance { get; } = new();
 
     readonly Dictionary<string, (OmniApi.OmniDetail Detail, long Expires)> _details = new();
     readonly Dictionary<string, long> _cooldown = new();
+    readonly Dictionary<string, (List<OmniApi.OmniItem> Items, long Expires)> _streamCache = new();
 
     public async Task<List<OmniApi.OmniItem>> SearchAsync(string keyword, int page)
     {
@@ -78,40 +81,108 @@ public sealed class LocalSiteEngine
         return new();
     }
 
-    /// <summary>全站搜索：搜索全部启用站点，逐源回调；isHomeSearch 只用于范围菜单，不限制搜索。</summary>
+    /// <summary>全站搜索：全部启用站点，按动态评分排序 + 缓存命中优先 + 滑动窗口逐源回调。</summary>
     public async Task SearchStreamingAsync(string keyword, int page, Action<OmniApi.OmniLocalSite, List<OmniApi.OmniItem>> onSite, CancellationToken ct = default)
     {
         var sources = LocalSourceStore.Instance.Cached;
-        var sites = (sources?.Sites ?? new())
-            .Where(site => !string.IsNullOrEmpty(site?.Api))
-            .OrderByDescending(site => site.Priority)
+        var ordered = (sources?.Sites ?? new())
+            .Where(site => !string.IsNullOrEmpty(site?.Api) && !IsCooling(site.Id))
+            .OrderByDescending(site => OmniSourceScoreStore.EffectiveScore(site.Id, false))
+            .ThenByDescending(site => site.Priority)
+            .ThenBy(site => OmniSourceScoreStore.Latency(site.Id, false))
             .ThenBy(site => site.Name)
             .ToList();
-        if (sites.Count == 0) return;
+        if (ordered.Count == 0) return;
+
+        var queue = new Queue<OmniApi.OmniLocalSite>();
+        foreach (var site in ordered)
+        {
+            if (TryGetStreamCache(StreamCacheKey(site, keyword, page), out var cached) && cached.Count > 0)
+                onSite(site, cached);
+            else
+                queue.Enqueue(site);
+        }
+        if (queue.Count == 0) return;
 
         var userConcurrency = Setting.GetInt("omni_concurrency");
         var concurrency = userConcurrency > 0 ? userConcurrency : Math.Max(12, sources.Concurrency);
         concurrency = Math.Clamp(concurrency, 1, 16);
-        using var gate = new SemaphoreSlim(concurrency);
-        var tasks = sites.Select(async site =>
+
+        using var windowCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        windowCts.CancelAfter(SearchStreamDeadlineMs);
+        var running = new HashSet<Task>();
+        while ((queue.Count > 0 || running.Count > 0) && !windowCts.IsCancellationRequested)
         {
-            await gate.WaitAsync(ct);
-            try
+            while (running.Count < concurrency && queue.Count > 0 && !windowCts.IsCancellationRequested)
             {
-                if (ct.IsCancellationRequested) return;
-                var items = await SearchSiteCoreAsync(site, keyword, page);
-                if (items.Count > 0 && !ct.IsCancellationRequested) onSite(site, items);
+                var site = queue.Dequeue();
+                running.Add(RunSiteAsync(site, keyword, page, onSite, windowCts.Token));
             }
-            catch (Exception e)
+            if (running.Count == 0) break;
+            var completed = await Task.WhenAny(running);
+            running.Remove(completed);
+        }
+        windowCts.Cancel();
+    }
+
+    async Task RunSiteAsync(OmniApi.OmniLocalSite site, string keyword, int page,
+        Action<OmniApi.OmniLocalSite, List<OmniApi.OmniItem>> onSite, CancellationToken token)
+    {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            var items = await SearchSiteCoreAsync(site, keyword, page);
+            watch.Stop();
+            OmniSourceScoreStore.Record(site.Id, site.Name, false, watch.ElapsedMilliseconds, items.Count, true);
+            if (items.Count > 0)
             {
-                Logger.E(Tag, "stream " + site.Name + ": " + e.Message);
+                PutStreamCache(StreamCacheKey(site, keyword, page), items);
+                if (!token.IsCancellationRequested) onSite(site, items);
             }
-            finally
+        }
+        catch (Exception e)
+        {
+            watch.Stop();
+            OmniSourceScoreStore.Record(site.Id, site.Name, false, watch.ElapsedMilliseconds, 0, false);
+            Logger.E(Tag, "stream " + site.Name + ": " + e.Message);
+        }
+    }
+
+    bool IsCooling(string id)
+    {
+        lock (_cooldown)
+            return _cooldown.TryGetValue(id, out var until) && until > Environment.TickCount64;
+    }
+
+    static string StreamCacheKey(OmniApi.OmniLocalSite site, string keyword, int page) =>
+        (LocalSourceStore.Instance.Cached?.Version ?? "") + "|" + site.Id + "|" + keyword + "|" + page;
+
+    bool TryGetStreamCache(string key, out List<OmniApi.OmniItem> items)
+    {
+        lock (_streamCache)
+        {
+            if (_streamCache.TryGetValue(key, out var cached) && cached.Expires > Environment.TickCount64)
             {
-                gate.Release();
+                items = cached.Items;
+                return true;
             }
-        }).ToList();
-        await Task.WhenAny(Task.WhenAll(tasks), Task.Delay(SearchStreamDeadlineMs, ct));
+            if (_streamCache.ContainsKey(key)) _streamCache.Remove(key);
+        }
+        items = null;
+        return false;
+    }
+
+    void PutStreamCache(string key, List<OmniApi.OmniItem> items)
+    {
+        lock (_streamCache)
+        {
+            _streamCache[key] = (items, Environment.TickCount64 + StreamCacheTtlMs);
+            if (_streamCache.Count > StreamCacheMax)
+            {
+                foreach (var pair in _streamCache.Where(pair => pair.Value.Expires <= Environment.TickCount64).Take(20).ToList())
+                    _streamCache.Remove(pair.Key);
+            }
+        }
     }
 
     static IEnumerable<Dictionary<string, string>> SearchVariants(string keyword, int page)

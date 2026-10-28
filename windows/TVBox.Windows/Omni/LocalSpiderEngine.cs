@@ -14,6 +14,8 @@ public sealed class LocalSpiderEngine
     const long DetailTtlMs = 2 * 60 * 1000;
     const long CooldownMs = 5 * 60 * 1000;
     const long ScriptRetryMs = 5 * 60 * 1000;
+    const long StreamCacheTtlMs = 2 * 60 * 1000;
+    const int StreamCacheMax = 200;
 
     public static LocalSpiderEngine Instance { get; } = new();
 
@@ -21,6 +23,7 @@ public sealed class LocalSpiderEngine
     readonly Dictionary<string, (OmniApi.OmniDetail Detail, long Expires)> _details = new();
     readonly Dictionary<string, long> _cooldown = new();
     readonly Dictionary<string, long> _scriptAttempts = new();
+    readonly Dictionary<string, (List<OmniApi.OmniItem> Items, long Expires)> _streamCache = new();
 
     static string ScriptDir => Path.Combine(AppPaths.Root, "omni", "spiders");
 
@@ -83,22 +86,106 @@ public sealed class LocalSpiderEngine
             .ToList();
     }
 
-    /// <summary>全站搜索：搜索全部兼容爬虫，逐源回调；isHomeSearch 只用于范围菜单，不限制搜索。</summary>
+    /// <summary>全站爬虫搜索：按动态评分排序 + 缓存命中优先 + 滑动窗口逐源回调。</summary>
     public async Task SearchStreamingAsync(string keyword, int page, Action<OmniApi.OmniLocalSpider, List<OmniApi.OmniItem>> onSpider, CancellationToken ct = default)
     {
-        var spiders = EnabledSpiders()
-            .OrderByDescending(spider => spider.Priority)
+        var ordered = EnabledSpiders()
+            .Where(spider => !IsCooling(spider.Id))
+            .OrderByDescending(spider => OmniSourceScoreStore.EffectiveScore(spider.Id, true))
+            .ThenByDescending(spider => spider.Priority)
+            .ThenBy(spider => OmniSourceScoreStore.Latency(spider.Id, true))
             .ThenBy(spider => spider.Name)
             .ToList();
-        if (spiders.Count == 0) return;
-        var tasks = spiders.Select(async spider =>
+        if (ordered.Count == 0) return;
+
+        var queue = new Queue<OmniApi.OmniLocalSpider>();
+        foreach (var spider in ordered)
         {
-            if (ct.IsCancellationRequested) return;
-            var items = await SearchOneAsync(spider, keyword, page);
-            if (items.Count > 0 && !ct.IsCancellationRequested) onSpider(spider, items);
-        }).ToList();
+            if (TryGetStreamCache(StreamCacheKey(spider, keyword, page), out var cached) && cached.Count > 0)
+                onSpider(spider, cached);
+            else
+                queue.Enqueue(spider);
+        }
+        if (queue.Count == 0) return;
+
+        var configured = Setting.OmniConcurrency;
+        var concurrency = Math.Clamp(configured > 0 ? configured : 6, 1, 6);
         var waitMs = Math.Clamp(Setting.OmniSpiderWait, 5, 20) * 1000;
-        await Task.WhenAny(Task.WhenAll(tasks), Task.Delay(waitMs, ct));
+        using var windowCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        windowCts.CancelAfter(waitMs);
+        var running = new HashSet<Task>();
+        while ((queue.Count > 0 || running.Count > 0) && !windowCts.IsCancellationRequested)
+        {
+            while (running.Count < concurrency && queue.Count > 0 && !windowCts.IsCancellationRequested)
+            {
+                var spider = queue.Dequeue();
+                running.Add(RunSpiderAsync(spider, keyword, page, onSpider, windowCts.Token));
+            }
+            if (running.Count == 0) break;
+            var completed = await Task.WhenAny(running);
+            running.Remove(completed);
+        }
+        windowCts.Cancel();
+    }
+
+    async Task RunSpiderAsync(OmniApi.OmniLocalSpider spider, string keyword, int page,
+        Action<OmniApi.OmniLocalSpider, List<OmniApi.OmniItem>> onSpider, CancellationToken token)
+    {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            var items = await SearchOneAsync(spider, keyword, page);
+            watch.Stop();
+            OmniSourceScoreStore.Record(spider.Id, spider.Name, true, watch.ElapsedMilliseconds, items.Count, true);
+            if (items.Count > 0)
+            {
+                PutStreamCache(StreamCacheKey(spider, keyword, page), items);
+                if (!token.IsCancellationRequested) onSpider(spider, items);
+            }
+        }
+        catch (Exception e)
+        {
+            watch.Stop();
+            OmniSourceScoreStore.Record(spider.Id, spider.Name, true, watch.ElapsedMilliseconds, 0, false);
+            Logger.E(Tag, "stream " + spider.Name + ": " + e.Message);
+        }
+    }
+
+    bool IsCooling(string id)
+    {
+        lock (_cooldown)
+            return _cooldown.TryGetValue(id, out var until) && until > Environment.TickCount64;
+    }
+
+    static string StreamCacheKey(OmniApi.OmniLocalSpider spider, string keyword, int page) =>
+        (LocalSourceStore.Instance.Cached?.Version ?? "") + "|" + spider.Id + "|" + keyword + "|" + page;
+
+    bool TryGetStreamCache(string key, out List<OmniApi.OmniItem> items)
+    {
+        lock (_streamCache)
+        {
+            if (_streamCache.TryGetValue(key, out var cached) && cached.Expires > Environment.TickCount64)
+            {
+                items = cached.Items;
+                return true;
+            }
+            if (_streamCache.ContainsKey(key)) _streamCache.Remove(key);
+        }
+        items = null;
+        return false;
+    }
+
+    void PutStreamCache(string key, List<OmniApi.OmniItem> items)
+    {
+        lock (_streamCache)
+        {
+            _streamCache[key] = (items, Environment.TickCount64 + StreamCacheTtlMs);
+            if (_streamCache.Count > StreamCacheMax)
+            {
+                foreach (var pair in _streamCache.Where(pair => pair.Value.Expires <= Environment.TickCount64).Take(20).ToList())
+                    _streamCache.Remove(pair.Key);
+            }
+        }
     }
 
     async Task<List<OmniApi.OmniItem>> SearchOneAsync(OmniApi.OmniLocalSpider spider, string keyword, int page)

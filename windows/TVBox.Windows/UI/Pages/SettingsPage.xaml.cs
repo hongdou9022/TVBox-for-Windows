@@ -207,6 +207,42 @@ public sealed partial class SettingsPage : Page
         }
     }
 
+    async void OnShowSourceScores(object sender, RoutedEventArgs e)
+    {
+        var scores = OmniSourceScoreStore.Snapshot();
+        var panel = new StackPanel { Spacing = 6 };
+        if (scores.Count == 0)
+        {
+            panel.Children.Add(new TextBlock { Text = "暂无评分记录，搜索几次后自动积累。" });
+        }
+        else
+        {
+            foreach (var score in scores)
+            {
+                var success = score.Samples > 0 ? score.Successes * 100.0 / score.Samples : 0;
+                var latency = score.LastLatencyMs > 0 ? score.LastLatencyMs + " ms" : "—";
+                panel.Children.Add(new TextBlock
+                {
+                    Text = $"{score.Name}{(score.Spider ? " ·源" : "")}    {score.EffectiveScore:0.0} 分    {score.Samples} 次   成功 {success:0}%   延迟 {latency}",
+                    TextWrapping = TextWrapping.Wrap,
+                });
+            }
+        }
+        var dialog = new ContentDialog
+        {
+            Title = "搜索源评分",
+            CloseButtonText = "关闭",
+            PrimaryButtonText = "清除评分",
+            XamlRoot = XamlRoot,
+            Content = new ScrollViewer { Content = panel, MaxHeight = 480, Width = 520 },
+        };
+        if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+        {
+            OmniSourceScoreStore.Clear();
+            ShowStatus("搜索源评分已清除", InfoBarSeverity.Success);
+        }
+    }
+
     async void OnOmniLogout(object sender, RoutedEventArgs e)
     {        var dialog = new ContentDialog
         {

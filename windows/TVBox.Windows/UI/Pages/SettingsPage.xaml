@@ -160,6 +160,7 @@
 
                     <StackPanel Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="2"
                                 Orientation="Horizontal" Spacing="12">
+                        <Button Content="搜索源评分" Click="OnShowSourceScores"/>
                         <Button Content="重新同步" Click="OnOmniReload"/>
                         <Button Content="导出日志" Click="OnExportLog"/>
                         <Button Content="退出登录" Click="OnOmniLogout"/>
