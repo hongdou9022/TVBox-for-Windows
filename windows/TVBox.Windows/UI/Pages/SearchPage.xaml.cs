@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using TVBoxForWindows.Core;
 using TVBoxForWindows.Engine;
+using TVBoxForWindows.Omni;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
@@ -177,12 +178,18 @@ public sealed partial class SearchPage : Page
     void RebuildGroups()
     {
         var selected = (SiteList.SelectedItem as SiteGroup)?.SiteName;
-        var sourceGroups = _allItems
+        var ordered = _allItems
+            .OrderBy(item => OmniSearchRank.MatchRank(_lastKeyword, item.Title))
+            .ThenBy(item => OmniSearchRank.TokenHit(_lastKeyword, item.Title))
+            .ThenBy(item => item.SourceName)
+            .ThenBy(item => item.Title)
+            .ToList();
+        var sourceGroups = ordered
             .GroupBy(item => SourceGroupName(string.IsNullOrEmpty(item.SourceName) ? "CloudTV" : item.SourceName))
             .Select(group => new SiteGroup(group.Key, group.ToList()))
             .ToList();
         _groups.Clear();
-        if (sourceGroups.Count > 1) _groups.Add(new SiteGroup("全部", _allItems.ToList()));
+        if (sourceGroups.Count > 1) _groups.Add(new SiteGroup("全部", ordered));
         foreach (var group in sourceGroups) _groups.Add(group);
         GroupedResultList.ItemsSource = sourceGroups;
         RefreshDisplayStyle();

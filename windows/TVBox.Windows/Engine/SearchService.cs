@@ -1,4 +1,5 @@
 using TVBoxForWindows.Models;
+using TVBoxForWindows.Omni;
 
 namespace TVBoxForWindows.Engine;
 
@@ -17,6 +18,11 @@ public class SearchService
         keyword = Core.Trans.T2S(keyword);
         var sites = VodConfigService.Instance.Sites.Where(s => quick ? s.IsQuickSearch : s.IsSearchable).ToList();
         if (sites.Count == 0) return;
+        if (sites.Count == 1 && string.Equals(sites[0].Api, "omni", StringComparison.OrdinalIgnoreCase))
+        {
+            await OmniSearchService.SearchStreamingAsync(keyword, page, onSiteResult, ct);
+            return;
+        }
         using var gate = new SemaphoreSlim(Environment.ProcessorCount);
         var tasks = sites.Select(site => SearchOne(site, keyword, quick, page, onSiteResult, gate, ct)).ToList();
         try { await Task.WhenAll(tasks); } catch { }

@@ -10,7 +10,7 @@ public sealed class LocalSiteEngine
     const string Tag = "LocalSiteEngine";
     const string Ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
     const int SearchDeadlineMs = 8000;
-    const int SearchSiteTimeoutMs = 4000;
+    const int SearchSiteTimeoutMs = 3500;
     const int DetailTimeoutMs = 6000;
     const long DetailTtlMs = 2 * 60 * 1000;
     const long CooldownMs = 5 * 60 * 1000;
@@ -41,35 +41,77 @@ public sealed class LocalSiteEngine
 
     async Task<List<OmniApi.OmniItem>> SearchSiteAsync(OmniApi.OmniLocalSite site, string keyword, int page, SemaphoreSlim gate)
     {
-        lock (_cooldown)
-        {
-            if (_cooldown.TryGetValue(site.Id, out var until) && until > Environment.TickCount64)
-                return new();
-        }
         await gate.WaitAsync();
         try
         {
-            foreach (var variant in SearchVariants(keyword, page))
-            {
-                try
-                {
-                    var json = await RequestAsync(site, variant, SearchSiteTimeoutMs);
-                    if (json?["list"] is not JsonArray list || list.Count == 0) continue;
-                    lock (_cooldown) _cooldown.Remove(site.Id);
-                    return ParseItems(site, list);
-                }
-                catch (Exception e)
-                {
-                    Logger.E(Tag, "search " + site.Name + ": " + e.Message);
-                }
-            }
-            lock (_cooldown) _cooldown[site.Id] = Environment.TickCount64 + CooldownMs;
-            return new();
+            return await SearchSiteCoreAsync(site, keyword, page);
         }
         finally
         {
             gate.Release();
         }
+    }
+
+    async Task<List<OmniApi.OmniItem>> SearchSiteCoreAsync(OmniApi.OmniLocalSite site, string keyword, int page)
+    {
+        lock (_cooldown)
+        {
+            if (_cooldown.TryGetValue(site.Id, out var until) && until > Environment.TickCount64)
+                return new();
+        }
+        foreach (var variant in SearchVariants(keyword, page))
+        {
+            try
+            {
+                var json = await RequestAsync(site, variant, SearchSiteTimeoutMs);
+                if (json?["list"] is not JsonArray list || list.Count == 0) continue;
+                lock (_cooldown) _cooldown.Remove(site.Id);
+                return ParseItems(site, list);
+            }
+            catch (Exception e)
+            {
+                Logger.E(Tag, "search " + site.Name + ": " + e.Message);
+            }
+        }
+        lock (_cooldown) _cooldown[site.Id] = Environment.TickCount64 + CooldownMs;
+        return new();
+    }
+
+    /// <summary>按 isHomeSearch 选择源并逐源回调（与 Android 搜索范围/流式逻辑一致）。</summary>
+    public async Task SearchStreamingAsync(string keyword, int page, Action<OmniApi.OmniLocalSite, List<OmniApi.OmniItem>> onSite, CancellationToken ct = default)
+    {
+        var sources = LocalSourceStore.Instance.Cached;
+        var all = (sources?.Sites ?? new())
+            .Where(site => !string.IsNullOrEmpty(site?.Api))
+            .ToList();
+        var sites = all.Where(site => site.IsHomeSearch).ToList();
+        if (sites.Count == 0) sites = all;
+        sites = sites.OrderByDescending(site => site.Priority).ThenBy(site => site.Name).ToList();
+        if (sites.Count == 0) return;
+
+        var userConcurrency = Setting.GetInt("omni_concurrency");
+        var concurrency = userConcurrency > 0 ? userConcurrency : Math.Max(12, sources.Concurrency);
+        concurrency = Math.Clamp(concurrency, 1, 16);
+        using var gate = new SemaphoreSlim(concurrency);
+        var tasks = sites.Select(async site =>
+        {
+            await gate.WaitAsync(ct);
+            try
+            {
+                if (ct.IsCancellationRequested) return;
+                var items = await SearchSiteCoreAsync(site, keyword, page);
+                if (items.Count > 0 && !ct.IsCancellationRequested) onSite(site, items);
+            }
+            catch (Exception e)
+            {
+                Logger.E(Tag, "stream " + site.Name + ": " + e.Message);
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }).ToList();
+        await Task.WhenAny(Task.WhenAll(tasks), Task.Delay(SearchDeadlineMs, ct));
     }
 
     static IEnumerable<Dictionary<string, string>> SearchVariants(string keyword, int page)

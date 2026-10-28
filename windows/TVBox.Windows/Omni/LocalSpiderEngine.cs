@@ -83,6 +83,24 @@ public sealed class LocalSpiderEngine
             .ToList();
     }
 
+    /// <summary>按 isHomeSearch 选择爬虫并逐源回调（与 Android 搜索范围/流式逻辑一致）。</summary>
+    public async Task SearchStreamingAsync(string keyword, int page, Action<OmniApi.OmniLocalSpider, List<OmniApi.OmniItem>> onSpider, CancellationToken ct = default)
+    {
+        var all = EnabledSpiders();
+        var spiders = all.Where(spider => spider.IsHomeSearch).ToList();
+        if (spiders.Count == 0) spiders = all;
+        spiders = spiders.OrderByDescending(spider => spider.Priority).ThenBy(spider => spider.Name).ToList();
+        if (spiders.Count == 0) return;
+        var tasks = spiders.Select(async spider =>
+        {
+            if (ct.IsCancellationRequested) return;
+            var items = await SearchOneAsync(spider, keyword, page);
+            if (items.Count > 0 && !ct.IsCancellationRequested) onSpider(spider, items);
+        }).ToList();
+        var waitMs = Math.Clamp(Setting.OmniSpiderWait, 5, 20) * 1000;
+        await Task.WhenAny(Task.WhenAll(tasks), Task.Delay(waitMs, ct));
+    }
+
     async Task<List<OmniApi.OmniItem>> SearchOneAsync(OmniApi.OmniLocalSpider spider, string keyword, int page)
     {
         lock (_cooldown)
