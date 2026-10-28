@@ -77,11 +77,7 @@ public static class OmniSearchService
             App.Post(() =>
             {
                 if (!ct.IsCancellationRequested)
-                    onStatus?.Invoke(new OmniSearchStatus
-                    {
-                        SearchedSources = cached.Searched,
-                        FromCache = true,
-                    });
+                    onStatus?.Invoke(new OmniSearchStatus { SearchedSources = cached.Searched });
             });
             return;
         }

@@ -13,7 +13,6 @@ public sealed class OmniSearchFailure
 public sealed class OmniSearchStatus
 {
     public int SearchedSources { get; init; }
-    public bool FromCache { get; init; }
     public List<OmniSearchFailure> Failures { get; init; } = new();
 }
 
