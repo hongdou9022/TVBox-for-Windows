@@ -97,6 +97,7 @@ public sealed partial class SearchPage : Page
                         Title = v.CleanName,
                         Remark = v.Remarks,
                         SourceName = string.IsNullOrEmpty(v.SourceName) ? site.Name : v.SourceName,
+                        SourcePriority = site.SourcePriority,
                         SiteKey = site.Key,
                         VodId = v.Id,
                     })
@@ -141,6 +142,7 @@ public sealed partial class SearchPage : Page
                         Title = v.CleanName,
                         Remark = v.Remarks,
                         SourceName = string.IsNullOrEmpty(v.SourceName) ? site.Name : v.SourceName,
+                        SourcePriority = site.SourcePriority,
                         SiteKey = site.Key,
                         VodId = v.Id,
                     })
@@ -181,6 +183,7 @@ public sealed partial class SearchPage : Page
         var ordered = _allItems
             .OrderBy(item => OmniSearchRank.MatchRank(_lastKeyword, item.Title))
             .ThenBy(item => OmniSearchRank.TokenHit(_lastKeyword, item.Title))
+            .ThenByDescending(item => item.SourcePriority)
             .ThenBy(item => item.SourceName)
             .ThenBy(item => item.Title)
             .ToList();
@@ -323,6 +326,7 @@ public class VodItem
     public string Title { get; set; }
     public string Remark { get; set; }
     public string SourceName { get; set; }
+    public int SourcePriority { get; set; }
     public string SiteKey { get; set; }
     public string VodId { get; set; }
     public string Action { get; set; }

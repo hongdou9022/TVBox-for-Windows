@@ -30,6 +30,7 @@ public class Site
     [JsonIgnore] public bool IsQuickSearch => (QuickSearch ?? 1) == 1 && IsSearchable;
     [JsonIgnore] public bool IsHidden => Hide == 1;
     [JsonIgnore] public bool IsEmpty => string.IsNullOrEmpty(Key);
+    [JsonIgnore] public int SourcePriority { get; set; }
     [JsonIgnore] public int RequestTimeout => Timeout > 0 ? Timeout * 1000 : Setting.SiteTimeout;
 
     /// <summary>type=4 时 ext 需先请求一次取回真实扩展。</summary>

@@ -83,13 +83,13 @@ public sealed class LocalSpiderEngine
             .ToList();
     }
 
-    /// <summary>按 isHomeSearch 选择爬虫并逐源回调（与 Android 搜索范围/流式逻辑一致）。</summary>
+    /// <summary>全站搜索：搜索全部兼容爬虫，逐源回调；isHomeSearch 只用于范围菜单，不限制搜索。</summary>
     public async Task SearchStreamingAsync(string keyword, int page, Action<OmniApi.OmniLocalSpider, List<OmniApi.OmniItem>> onSpider, CancellationToken ct = default)
     {
-        var all = EnabledSpiders();
-        var spiders = all.Where(spider => spider.IsHomeSearch).ToList();
-        if (spiders.Count == 0) spiders = all;
-        spiders = spiders.OrderByDescending(spider => spider.Priority).ThenBy(spider => spider.Name).ToList();
+        var spiders = EnabledSpiders()
+            .OrderByDescending(spider => spider.Priority)
+            .ThenBy(spider => spider.Name)
+            .ToList();
         if (spiders.Count == 0) return;
         var tasks = spiders.Select(async spider =>
         {
