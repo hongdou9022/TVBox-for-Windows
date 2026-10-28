@@ -41,48 +41,14 @@ public sealed class OmniSpider : Spider
 
     static List<OmniApi.OmniResumeItem> _homeResume = new();
 
-    public override async Task<string> HomeContent(bool filter)
+    public override Task<string> HomeContent(bool filter)
     {
+        // 首页不等待网络：立即返回分类，“继续观看”点击时再懒加载。
         var result = new Result();
+        result.Types.Add(new VodClass { TypeId = "omni:resume", TypeName = "继续观看" });
         foreach (var def in DoubanClasses)
             result.Types.Add(new VodClass { TypeId = def[0], TypeName = def[1] });
-        try
-        {
-            var resumeTask = LoadResumeSafeAsync();
-            var recommendTask = LoadRecommendations();
-            await Task.WhenAll(resumeTask, recommendTask);
-            _homeResume = resumeTask.Result;
-            if (_homeResume.Count > 0)
-                result.Types.Insert(0, new VodClass { TypeId = "omni:resume", TypeName = "继续观看" });
-            var recommendations = recommendTask.Result;
-            var resumeTitles = new HashSet<string>(_homeResume
-                .Select(item => Normalize(item.Title))
-                .Where(title => title.Length > 0));
-            var limit = 48;
-            foreach (var item in recommendations)
-            {
-                if (result.List.Count >= limit) break;
-                if (item == null || string.IsNullOrEmpty(item.Title)) continue;
-                if (resumeTitles.Contains(Normalize(item.Title))) continue;
-                var vodId = !string.IsNullOrEmpty(item.LibraryId) && !string.IsNullOrEmpty(item.VideoId)
-                    ? OmniIds.EncodeVod(string.IsNullOrEmpty(item.SourceType) ? "spider" : item.SourceType,
-                        item.LibraryId, item.VideoId)
-                    : "msearch:" + item.Title;
-                result.List.Add(new Vod
-                {
-                    Id = vodId,
-                    Name = item.Title,
-                    Pic = item.Poster ?? "",
-                    Remarks = item.Subtitle ?? "",
-                });
-            }
-        }
-        catch (Exception e)
-        {
-            Logger.E("OmniSpider.home", e.Message);
-            return JsonUtil.Serialize(Result.Error(e.Message));
-        }
-        return JsonUtil.Serialize(result);
+        return Task.FromResult(JsonUtil.Serialize(result));
     }
 
     static async Task<List<OmniApi.OmniResumeItem>> LoadResumeSafeAsync()
@@ -146,6 +112,7 @@ public sealed class OmniSpider : Spider
         if (tid == "omni:resume")
         {
             var resume = _homeResume.Count > 0 ? _homeResume : await LoadResumeSafeAsync();
+            if (_homeResume.Count == 0) _homeResume = resume;
             var list = resume
                 .Where(item => item != null && !string.IsNullOrEmpty(item.LibraryId) && !string.IsNullOrEmpty(item.VideoId))
                 .Select(ToVodJson)
@@ -188,6 +155,9 @@ public sealed class OmniSpider : Spider
 
     async Task<string> DoubanCategoryContent(string spec, int page)
     {
+        var cacheKey = "douban|" + spec + "|" + page;
+        if (_doubanCache.TryGetValue(cacheKey, out var cached) && cached.Expires > Environment.TickCount64)
+            return cached.Json;
         var parts = spec.Split(':');
         var primary = parts.Length > 0 ? parts[0] : "movie";
         var kind = parts.Length > 1 ? parts[1] : "hot";
@@ -223,13 +193,15 @@ public sealed class OmniSpider : Spider
                 ["vod_pic"] = !string.IsNullOrEmpty(item.Pic?.Large) ? item.Pic.Large : item.Pic?.Normal ?? "",
                 ["vod_remarks"] = RatingOf(item) > 0 ? "★ " + RatingOf(item).ToString("0.0") : "",
             }).ToList();
-            return JsonUtil.Serialize(new Dictionary<string, object>
+            var json = JsonUtil.Serialize(new Dictionary<string, object>
             {
                 ["list"] = list,
                 ["page"] = page,
                 ["pagecount"] = 5,
                 ["total"] = source.Count,
             });
+            _doubanCache[cacheKey] = (json, Environment.TickCount64 + 5 * 60 * 1000);
+            return json;
         }
         catch (Exception e)
         {
@@ -486,23 +458,44 @@ public sealed class OmniSpider : Spider
         var page = int.TryParse(pg, out var parsed) ? Math.Max(1, parsed) : 1;
         try
         {
-            var siteTask = LocalSiteEngine.Instance.SearchAsync(key, page);
-            var spiderTask = LocalSpiderEngine.Instance.SearchAsync(key, page);
-            await Task.WhenAll(siteTask, spiderTask);
-            var merged = siteTask.Result.Concat(spiderTask.Result)
-                .GroupBy(item => item.LibraryId + "|" + item.VideoId)
-                .Select(group => group.First())
-                .ToList();
-            var items = AggregateItems(RankByRelevance(key, merged));
+            var cacheKey = key + "|" + page;
+            if (_searchCache.TryGetValue(cacheKey, out var cached) && cached.Expires > Environment.TickCount64)
+                return cached.Json;
+
+            List<OmniApi.OmniItem> items = null;
             var pageCount = Math.Max(page, 1);
-            var total = items.Count;
-            if (items.Count == 0)
+            var total = 0;
+
+            // 服务端搜索与网页同源，优先保证速度和结果量；失败才回退本地抓取。
+            try
             {
                 var remote = await OmniApi.SearchAsync(key, page, true);
-                items = AggregateItems(RankByRelevance(key, remote.Items ?? new()));
-                pageCount = Math.Max(page, remote.PageCount);
-                total = remote.Total;
+                if (remote.Items.Count > 0)
+                {
+                    items = AggregateItems(RankByRelevance(key, remote.Items));
+                    pageCount = Math.Max(page, remote.PageCount);
+                    total = remote.Total;
+                }
             }
+            catch (Exception e)
+            {
+                Logger.E("OmniSpider.searchRemote", e.Message);
+            }
+
+            if (items == null || items.Count == 0)
+            {
+                var siteTask = LocalSiteEngine.Instance.SearchAsync(key, page);
+                var spiderTask = LocalSpiderEngine.Instance.SearchAsync(key, page);
+                await Task.WhenAll(siteTask, spiderTask);
+                var merged = siteTask.Result.Concat(spiderTask.Result)
+                    .GroupBy(item => item.LibraryId + "|" + item.VideoId)
+                    .Select(group => group.First())
+                    .ToList();
+                items = AggregateItems(RankByRelevance(key, merged));
+                pageCount = Math.Max(page, 1);
+                total = items.Count;
+            }
+
             var payload = new Dictionary<string, object>
             {
                 ["list"] = items
@@ -512,7 +505,14 @@ public sealed class OmniSpider : Spider
                 ["pagecount"] = pageCount,
                 ["total"] = total,
             };
-            return JsonUtil.Serialize(payload);
+            var json = JsonUtil.Serialize(payload);
+            _searchCache[cacheKey] = (json, Environment.TickCount64 + 5 * 60 * 1000);
+            if (_searchCache.Count > 120)
+            {
+                foreach (var pair in _searchCache.Where(pair => pair.Value.Expires <= Environment.TickCount64).Take(20))
+                    _searchCache.TryRemove(pair.Key, out _);
+            }
+            return json;
         }
         catch (Exception e)
         {
@@ -520,6 +520,9 @@ public sealed class OmniSpider : Spider
             return JsonUtil.Serialize(Result.Error(e.Message));
         }
     }
+
+    static readonly ConcurrentDictionary<string, (string Json, long Expires)> _searchCache = new();
+    static readonly ConcurrentDictionary<string, (string Json, long Expires)> _doubanCache = new();
 
     // ---------------------------------------------------------------- 多来源聚合
 

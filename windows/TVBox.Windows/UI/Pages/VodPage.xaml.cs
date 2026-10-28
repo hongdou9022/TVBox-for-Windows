@@ -15,7 +15,7 @@ namespace TVBoxForWindows.UI.Pages;
 /// folder 类型子层导航（面包屑返回）。点击条目 → DetailPage。</summary>
 public sealed partial class VodPage : Page
 {
-    const int MaxAutoFill = 3; // 首屏未填满时的自动补页上限
+    const int MaxAutoFill = 0; // 首屏不自动补页，触底再加载
 
     readonly ObservableCollection<VodCell> _items = new();
     readonly List<FolderLevel> _folders = new();
