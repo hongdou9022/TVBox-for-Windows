@@ -140,7 +140,7 @@
             </Grid>
         </NavigationView>
 
-        <!-- 首次启动源配置：点播加载成功前覆盖并锁定整个应用界面。 -->
+        <!-- 首次启动：CloudTV 登录，登录成功前覆盖并锁定整个应用界面。 -->
         <Grid x:Name="WelcomePanel"
               Grid.RowSpan="2"
               Visibility="Collapsed"
@@ -156,30 +156,37 @@
                     BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                     BorderThickness="1">
                 <StackPanel Spacing="16">
-                    <TextBlock Text="添加初始源" FontSize="28" FontWeight="SemiBold"/>
-                    <TextBlock Text="点播配置为必填，直播配置可以稍后添加。"
+                    <TextBlock Text="登录 CloudTV" FontSize="28" FontWeight="SemiBold"/>
+                    <TextBlock Text="登录后自动同步影视库、影视站与爬虫源。"
                                TextWrapping="Wrap"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
 
                     <StackPanel Spacing="6">
-                        <TextBlock Text="点播配置" FontWeight="SemiBold"/>
-                        <TextBox x:Name="ConfigUrlBox"
-                                 PlaceholderText="http(s)://... 点播配置地址"
-                                 KeyDown="OnConfigUrlKeyDown"/>
+                        <TextBlock Text="服务器地址" FontWeight="SemiBold"/>
+                        <TextBox x:Name="ServerBox"
+                                 PlaceholderText="http(s)://cloudtv.example.com"
+                                 KeyDown="OnLoginKeyDown"/>
                     </StackPanel>
 
                     <StackPanel Spacing="6">
-                        <TextBlock Text="直播配置（可选）" FontWeight="SemiBold"/>
-                        <TextBox x:Name="InitialLiveUrlBox"
-                                 PlaceholderText="TXT / M3U / JSON / TVBox / CatPawOpen 地址"
-                                 KeyDown="OnConfigUrlKeyDown"/>
+                        <TextBlock Text="用户名" FontWeight="SemiBold"/>
+                        <TextBox x:Name="UserBox"
+                                 PlaceholderText="用户名"
+                                 KeyDown="OnLoginKeyDown"/>
+                    </StackPanel>
+
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="密码" FontWeight="SemiBold"/>
+                        <PasswordBox x:Name="PassBox"
+                                     PlaceholderText="密码"
+                                     KeyDown="OnLoginKeyDown"/>
                     </StackPanel>
 
                     <StackPanel Orientation="Horizontal" Spacing="12">
-                        <Button x:Name="LoadConfigButton"
-                                Content="加载并开始"
+                        <Button x:Name="LoginButton"
+                                Content="登录并开始"
                                 Style="{StaticResource AccentButtonStyle}"
-                                Click="OnLoadConfig"/>
+                                Click="OnLogin"/>
                         <ProgressRing x:Name="LoadRing"
                                       IsActive="False"
                                       Width="24"
@@ -190,7 +197,7 @@
                              IsOpen="False"
                              IsClosable="False"
                              Severity="Error"
-                             Title="加载失败"/>
+                             Title="登录失败"/>
                 </StackPanel>
             </Border>
         </Grid>

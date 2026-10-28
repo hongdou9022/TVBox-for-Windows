@@ -17,7 +17,12 @@ public sealed partial class SearchPage : Page
     const int HistoryMax = 16;
 
     readonly ObservableCollection<SiteGroup> _groups = new();
+    readonly List<VodItem> _allItems = new();
     CancellationTokenSource _cts;
+    string _lastKeyword = "";
+    int _page = 1;
+    bool _loadingMore;
+    bool _end;
 
     public SearchPage()
     {
@@ -37,6 +42,11 @@ public sealed partial class SearchPage : Page
         if (e.Parameter is string keyword && !string.IsNullOrWhiteSpace(keyword))
         {
             SearchBox.Text = keyword;
+            // 从详情/播放页返回时复用已有结果，不重复搜索。
+            if (e.NavigationMode == NavigationMode.Back &&
+                string.Equals(keyword, _lastKeyword, StringComparison.Ordinal) &&
+                _allItems.Count > 0)
+                return;
             StartSearch(keyword);
         }
     }
@@ -53,12 +63,21 @@ public sealed partial class SearchPage : Page
     {
         keyword = (keyword ?? "").Trim();
         if (keyword.Length == 0) return;
+        _lastKeyword = keyword;
+        _page = 1;
+        _end = false;
+        _loadingMore = false;
+        LoadMoreButton.Visibility = Visibility.Collapsed;
+        LoadMoreButton.Content = "加载更多";
+        LoadMoreButton.IsEnabled = true;
         SaveKeyword(keyword);
         LoadChips();
         UpdateScope();
         _cts?.Cancel();
         var cts = _cts = new CancellationTokenSource();
+        _allItems.Clear();
         _groups.Clear();
+        GroupedResultList.ItemsSource = null;
         ResultGrid.ItemsSource = null;
         SiteList.Visibility = Visibility.Collapsed;
         EmptyText.Visibility = Visibility.Collapsed;
@@ -71,11 +90,18 @@ public sealed partial class SearchPage : Page
             {
                 if (cts.IsCancellationRequested) return;
                 var items = list
-                    .Select(v => new VodItem { Pic = v.Pic, Title = v.CleanName, Remark = v.Remarks, SiteKey = site.Key, VodId = v.Id })
+                    .Select(v => new VodItem
+                    {
+                        Pic = v.Pic,
+                        Title = v.CleanName,
+                        Remark = v.Remarks,
+                        SourceName = string.IsNullOrEmpty(v.SourceName) ? site.Name : v.SourceName,
+                        SiteKey = site.Key,
+                        VodId = v.Id,
+                    })
                     .ToList();
-                _groups.Add(new SiteGroup(site.Name, items));
-                RefreshDisplayStyle();
-                if (SiteList.SelectedIndex < 0) SiteList.SelectedIndex = 0;
+                _allItems.AddRange(items);
+                RebuildGroups();
             }, cts.Token);
         }
         catch (Exception e) { Logger.E("SearchPage", e.Message); }
@@ -83,11 +109,102 @@ public sealed partial class SearchPage : Page
         {
             if (cts == _cts)
             {
+                _cts = null;
                 SearchProgress.Visibility = Visibility.Collapsed;
                 CancelButton.Visibility = Visibility.Collapsed;
-                EmptyText.Visibility = _groups.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+                EmptyText.Visibility = _allItems.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+                LoadMoreButton.Visibility = _allItems.Count > 0 && !_end ? Visibility.Visible : Visibility.Collapsed;
             }
         }
+    }
+
+    /// <summary>加载下一页：追加结果并重建来源分组；返回 0 条视为结束。</summary>
+    async void OnLoadMore(object sender, RoutedEventArgs e)
+    {
+        if (_loadingMore || _cts != null || _end || string.IsNullOrEmpty(_lastKeyword)) return;
+        _loadingMore = true;
+        LoadMoreButton.IsEnabled = false;
+        LoadMoreButton.Content = "加载中…";
+        var page = _page + 1;
+        var added = 0;
+        try
+        {
+            using var cts = new CancellationTokenSource();
+            await SearchService.SearchPage(_lastKeyword, false, page.ToString(), (site, list) =>
+            {
+                if (cts.IsCancellationRequested) return;
+                var items = list
+                    .Select(v => new VodItem
+                    {
+                        Pic = v.Pic,
+                        Title = v.CleanName,
+                        Remark = v.Remarks,
+                        SourceName = string.IsNullOrEmpty(v.SourceName) ? site.Name : v.SourceName,
+                        SiteKey = site.Key,
+                        VodId = v.Id,
+                    })
+                    .Where(item => !_allItems.Any(existing =>
+                        (existing.SiteKey == item.SiteKey && existing.VodId == item.VodId) ||
+                        string.Equals(existing.Title, item.Title, StringComparison.Ordinal)))
+                    .ToList();
+                if (items.Count == 0) return;
+                added += items.Count;
+                _allItems.AddRange(items);
+                RebuildGroups();
+            }, cts.Token);
+            _page = page;
+            if (added == 0)
+            {
+                _end = true;
+                LoadMoreButton.Content = "没有更多结果";
+            }
+            else LoadMoreButton.Content = "加载更多";
+        }
+        catch (Exception ex)
+        {
+            Logger.E("SearchPage", "load more: " + ex.Message);
+            LoadMoreButton.Content = "加载更多";
+        }
+        finally
+        {
+            _loadingMore = false;
+            LoadMoreButton.IsEnabled = !_end;
+            LoadMoreButton.Visibility = _allItems.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        }
+    }
+
+    /// <summary>按来源重建分组；多来源时额外提供“全部”（保持跨来源相关度顺序）。</summary>
+    void RebuildGroups()
+    {
+        var selected = (SiteList.SelectedItem as SiteGroup)?.SiteName;
+        var sourceGroups = _allItems
+            .GroupBy(item => SourceGroupName(string.IsNullOrEmpty(item.SourceName) ? "CloudTV" : item.SourceName))
+            .Select(group => new SiteGroup(group.Key, group.ToList()))
+            .ToList();
+        _groups.Clear();
+        if (sourceGroups.Count > 1) _groups.Add(new SiteGroup("全部", _allItems.ToList()));
+        foreach (var group in sourceGroups) _groups.Add(group);
+        GroupedResultList.ItemsSource = sourceGroups;
+        RefreshDisplayStyle();
+        if (_groups.Count == 0) return;
+        var index = 0;
+        if (!string.IsNullOrEmpty(selected))
+        {
+            var found = _groups.ToList().FindIndex(group => group.SiteName == selected);
+            if (found >= 0) index = found;
+        }
+        SiteList.SelectedIndex = index;
+        ResultGrid.ItemsSource = _groups[index].Items;
+    }
+
+    /// <summary>聚合卡片来源形如“豪华资源 等 6 源”，分组时按主源名归并。</summary>
+    static string SourceGroupName(string name)
+    {
+        var value = name ?? "";
+        var index = value.IndexOf(" 等", StringComparison.Ordinal);
+        if (index > 0) return value[..index];
+        index = value.IndexOf(" +", StringComparison.Ordinal);
+        return index > 0 ? value[..index] : value;
     }
 
     void OnCancel(object sender, RoutedEventArgs e) => _cts?.Cancel();
@@ -198,6 +315,7 @@ public class VodItem
     public string Pic { get; set; }
     public string Title { get; set; }
     public string Remark { get; set; }
+    public string SourceName { get; set; }
     public string SiteKey { get; set; }
     public string VodId { get; set; }
     public string Action { get; set; }

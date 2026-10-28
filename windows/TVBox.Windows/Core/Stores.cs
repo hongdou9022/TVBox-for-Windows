@@ -196,5 +196,28 @@ public static class Stores
         }
     }
 
+    /// <summary>把旧版未区分账号的本地历史/收藏迁移到当前 CloudTV 账号。</summary>
+    public static void MigrateCid(int from, int to)
+    {
+        if (from == to) return;
+        lock (Lock)
+        {
+            var historyChanged = false;
+            foreach (var item in Histories.Where(h => h.Cid == from)) { item.Cid = to; historyChanged = true; }
+            var keepChanged = false;
+            foreach (var item in Keeps.Where(k => k.Cid == from)) { item.Cid = to; keepChanged = true; }
+            if (historyChanged)
+            {
+                Save(HistoryFile, Histories);
+                Interlocked.Increment(ref _historyRevision);
+            }
+            if (keepChanged)
+            {
+                Save(KeepFile, Keeps);
+                Interlocked.Increment(ref _keepRevision);
+            }
+        }
+    }
+
     public static long Now() => DateTimeOffset.Now.ToUnixTimeMilliseconds();
 }

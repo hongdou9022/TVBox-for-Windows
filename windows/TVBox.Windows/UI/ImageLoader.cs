@@ -38,11 +38,27 @@ public static class ImageLoader
         var file = CacheFile(pic);
         try { if (File.Exists(file)) return await File.ReadAllBytesAsync(file); } catch { }
         var (url, headers) = ParsePic(pic);
-        try
+        if (!url.StartsWith("http", StringComparison.OrdinalIgnoreCase))
         {
-            if (url.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+            try { return File.Exists(url) ? await File.ReadAllBytesAsync(url) : null; }
+            catch { return null; }
+        }
+
+        if (!headers.ContainsKey("User-Agent"))
+            headers["User-Agent"] = string.IsNullOrWhiteSpace(Setting.Ua)
+                ? "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36"
+                : Setting.Ua;
+        if (!headers.ContainsKey("Accept"))
+            headers["Accept"] = "image/avif,image/webp,image/*,*/*;q=0.8";
+        if (!headers.ContainsKey("Referer") && Uri.TryCreate(url, UriKind.Absolute, out var douban) &&
+            douban.Host.EndsWith("doubanio.com", StringComparison.OrdinalIgnoreCase))
+            headers["Referer"] = "https://movie.douban.com/";
+
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            try
             {
-                var res = await HttpUtil.Get(url, headers);
+                var res = await HttpUtil.Get(url, headers, null, 8000);
                 if (ShouldRetryWithReferer(res) && !headers.ContainsKey("Referer") &&
                     Uri.TryCreate(url, UriKind.Absolute, out var uri))
                 {
@@ -50,15 +66,22 @@ public static class ImageLoader
                     {
                         ["Referer"] = uri.GetLeftPart(UriPartial.Authority) + "/",
                     };
-                    res = await HttpUtil.Get(url, headers);
+                    res = await HttpUtil.Get(url, headers, null, 8000);
                 }
-                if (res.Code >= 400 || res.Body == null || res.Body.Length == 0) return null;
+                if (res.Code >= 400 || res.Body == null || res.Body.Length == 0)
+                {
+                    if (attempt == 0) continue;
+                    return null;
+                }
                 try { await File.WriteAllBytesAsync(file, res.Body); } catch { }
                 return res.Body;
             }
-            if (File.Exists(url)) return await File.ReadAllBytesAsync(url);
+            catch (Exception e)
+            {
+                Logger.E("ImageLoader", url + " " + e.Message);
+                if (attempt > 0) return null;
+            }
         }
-        catch (Exception e) { Logger.E("ImageLoader", url + " " + e.Message); }
         return null;
     }
 

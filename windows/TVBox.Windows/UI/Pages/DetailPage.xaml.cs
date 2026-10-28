@@ -3,6 +3,7 @@ using System.Text.RegularExpressions;
 using TVBoxForWindows.Core;
 using TVBoxForWindows.Engine;
 using TVBoxForWindows.Models;
+using TVBoxForWindows.Omni;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
@@ -19,6 +20,8 @@ public sealed partial class DetailPage : Page
     Site _site;
     Vod _vod;
     string _vodId;
+    string _remoteFavoriteId = "";
+    bool _testAutoPlayed;
     List<VodFlag> _flags = new();
     List<Episode> _ordered = new(); // 当前线路按显示顺序排列的集数
     int _flagIndex;
@@ -104,7 +107,7 @@ public sealed partial class DetailPage : Page
         TitleText.Text = NameText.Text = vod.CleanName;
         Poster.Source = vod.Pic;
         Backdrop.Source = vod.Pic;
-        MetaText.Text = Join(vod.Year, vod.Area, vod.TypeName, vod.Remarks);
+        MetaText.Text = Join(vod.Year, vod.Area, vod.TypeName, vod.SourceName, vod.Remarks);
         SetOptional(DirectorText, "导演：", vod.Director);
         SetOptional(ActorText, "演员：", vod.Actor);
         var content = StripHtml(vod.Content);
@@ -131,6 +134,13 @@ public sealed partial class DetailPage : Page
         RefreshEpisodes();
         UpdatePlayButton();
         UpdateKeepState();
+        _ = RefreshRemoteKeepAsync();
+        if (!_testAutoPlayed && Environment.GetEnvironmentVariable("TVBOX_TEST_AUTOPLAY") == "1")
+        {
+            _testAutoPlayed = true;
+            _ = Task.Delay(5000).ContinueWith(_ =>
+                DispatcherQueue.TryEnqueue(() => Play(_flagIndex, RememberedEpisodeIndex())));
+        }
     }
 
     // ---------- 线路与集数 ----------
@@ -217,7 +227,8 @@ public sealed partial class DetailPage : Page
         if (_vod == null) { KeepButton.IsChecked = false; return; }
         var cid = VodConfigService.Cid;
         var key = HistoryKey();
-        if (KeepButton.IsChecked == true)
+        var keep = KeepButton.IsChecked == true;
+        if (keep)
             Stores.SaveKeep(new Keep
             {
                 Key = key,
@@ -229,6 +240,62 @@ public sealed partial class DetailPage : Page
             });
         else Stores.DeleteKeep(cid, key);
         UpdateKeepState();
+        var reference = OmniIds.DecodeVodRef(_vod.Id);
+        if (reference != null) _ = SyncRemoteKeepAsync(keep, reference, _vod);
+    }
+
+    /// <summary>加载详情后同步 CloudTV 收藏状态；本地有而服务端缺失时自动补一次。</summary>
+    async Task RefreshRemoteKeepAsync()
+    {
+        var vod = _vod;
+        if (vod == null) return;
+        var reference = OmniIds.DecodeVodRef(vod.Id);
+        if (reference == null) return;
+        var key = HistoryKey();
+        try
+        {
+            var id = await OmniApi.FavoriteIdAsync(reference.LibraryId, reference.VideoId);
+            var localKeep = Stores.FindKeep(VodConfigService.Cid, key) != null;
+            if (string.IsNullOrEmpty(id) && localKeep)
+            {
+                await OmniApi.AddFavoriteAsync(reference.LibraryId, reference.VideoId,
+                    vod.CleanName, vod.Pic, vod.Remarks, 0);
+                id = await OmniApi.FavoriteIdAsync(reference.LibraryId, reference.VideoId) ?? "";
+                if (string.IsNullOrEmpty(id)) ShowMsg("收藏已保存在本地，服务端同步失败");
+            }
+            if (!ReferenceEquals(_vod, vod)) return;
+            _remoteFavoriteId = id ?? "";
+        }
+        catch (Exception e)
+        {
+            Logger.E("DetailPage", "favorite check: " + e.Message);
+        }
+        UpdateKeepState();
+    }
+
+    async Task SyncRemoteKeepAsync(bool keep, OmniIds.VodRef reference, Vod vod)
+    {
+        try
+        {
+            if (keep)
+            {
+                await OmniApi.AddFavoriteAsync(reference.LibraryId, reference.VideoId,
+                    vod.CleanName, vod.Pic, vod.Remarks, 0);
+                _remoteFavoriteId = await OmniApi.FavoriteIdAsync(reference.LibraryId, reference.VideoId) ?? "";
+            }
+            else
+            {
+                var id = _remoteFavoriteId;
+                if (string.IsNullOrEmpty(id)) id = await OmniApi.FavoriteIdAsync(reference.LibraryId, reference.VideoId);
+                if (!string.IsNullOrEmpty(id)) await OmniApi.RemoveFavoriteAsync(id);
+                _remoteFavoriteId = "";
+            }
+        }
+        catch (Exception e)
+        {
+            Logger.E("DetailPage", "favorite sync: " + e.Message);
+        }
+        App.Post(UpdateKeepState);
     }
 
     void OnSearchOther(object sender, RoutedEventArgs e)
@@ -276,7 +343,8 @@ public sealed partial class DetailPage : Page
 
     void UpdateKeepState()
     {
-        var kept = _vod != null && Stores.FindKeep(VodConfigService.Cid, HistoryKey()) != null;
+        var kept = _vod != null &&
+            (Stores.FindKeep(VodConfigService.Cid, HistoryKey()) != null || !string.IsNullOrEmpty(_remoteFavoriteId));
         KeepButton.IsChecked = kept;
         KeepIcon.Glyph = kept ? "\uE735" : "\uE734"; // FavoriteStarFill / FavoriteStar
         KeepText.Text = kept ? "已收藏" : "收藏";

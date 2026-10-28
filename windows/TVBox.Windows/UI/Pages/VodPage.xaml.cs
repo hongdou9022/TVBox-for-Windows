@@ -39,6 +39,11 @@ public sealed partial class VodPage : Page
             _configUrl = null;
             if (IsLoaded) InitSites();
         };
+        // 配置可能晚于页面构造注入，首帧加载时再对齐一次。
+        Loaded += (s, e) =>
+        {
+            if (_configUrl != VodConfigService.Instance.Config?.Url) InitSites();
+        };
     }
 
     protected override void OnNavigatedTo(NavigationEventArgs e)
@@ -97,10 +102,12 @@ public sealed partial class VodPage : Page
             _squelch = false;
             if (_types.Count > 0)
             {
+                // “继续观看”是首页入口，默认仍展示第一个豆瓣分类。
+                var defaultType = _types.FirstOrDefault(type => type.TypeId != "omni:resume") ?? _types[0];
                 _squelch = true;
-                ClassList.SelectedIndex = 0;
+                ClassList.SelectedItem = defaultType;
                 _squelch = false;
-                SelectClass(_types[0]);
+                SelectClass(defaultType);
             }
             else if (result.List.Count > 0)
             {

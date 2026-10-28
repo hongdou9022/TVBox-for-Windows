@@ -21,3 +21,8 @@ TestResults/
 *.pfx
 *.p12
 *.key
+
+# publish output
+dist/
+
+dist-lite/

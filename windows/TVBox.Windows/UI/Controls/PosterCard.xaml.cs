@@ -23,6 +23,10 @@ public sealed partial class PosterCard : UserControl
         nameof(Remark), typeof(string), typeof(PosterCard),
         new PropertyMetadata("", (d, e) => ((PosterCard)d).SetRemark(e.NewValue as string)));
 
+    public static readonly DependencyProperty SourceProperty = DependencyProperty.Register(
+        nameof(Source), typeof(string), typeof(PosterCard),
+        new PropertyMetadata("", (d, e) => ((PosterCard)d).SetSource(e.NewValue as string)));
+
     /// <summary>卡片点击（Tapped 触发，不拦截冒泡，可与 ListView/GridView 的 ItemClick 并存）。</summary>
     public event RoutedEventHandler Click;
 
@@ -37,11 +41,18 @@ public sealed partial class PosterCard : UserControl
     public string Pic { get => (string)GetValue(PicProperty); set => SetValue(PicProperty, value); }
     public string Title { get => (string)GetValue(TitleProperty); set => SetValue(TitleProperty, value); }
     public string Remark { get => (string)GetValue(RemarkProperty); set => SetValue(RemarkProperty, value); }
+    public string Source { get => (string)GetValue(SourceProperty); set => SetValue(SourceProperty, value); }
 
     void SetRemark(string value)
     {
         RemarkText.Text = value ?? "";
         RemarkBadge.Visibility = string.IsNullOrWhiteSpace(value) ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    void SetSource(string value)
+    {
+        SourceText.Text = value ?? "";
+        SourceText.Visibility = string.IsNullOrWhiteSpace(value) ? Visibility.Collapsed : Visibility.Visible;
     }
 
     /// <summary>WinUI3 的 RectangleGeometry 无 RadiusX/RadiusY，改用 Composition 圆角矩形裁剪保持圆角海报效果。</summary>

@@ -56,11 +56,6 @@
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       <TargetPath>assets\%(RecursiveDir)%(Filename)%(Extension)</TargetPath>
     </Content>
-    <Content Include="node\**\*.*" Exclude="$(UserDataPublishExcludes)">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-      <TargetPath>node\%(RecursiveDir)%(Filename)%(Extension)</TargetPath>
-    </Content>
   </ItemGroup>
 
   <ItemGroup>

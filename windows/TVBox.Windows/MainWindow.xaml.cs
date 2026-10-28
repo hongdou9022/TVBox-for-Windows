@@ -2,6 +2,7 @@ using TVBoxForWindows.Core;
 using TVBoxForWindows.Engine;
 using TVBoxForWindows.Live;
 using TVBoxForWindows.Models;
+using TVBoxForWindows.Omni;
 using TVBoxForWindows.Server;
 using TVBoxForWindows.UI;
 using TVBoxForWindows.UI.Pages;
@@ -653,21 +654,30 @@ public sealed partial class MainWindow : Window
 
     void Startup()
     {
-        ActivateSection("vod", VodFrame, typeof(VodPage));
-        var config = Stores.ResolveConfig(Setting.ConfigVod, 0);
-        if (config == null)
+        if (!OmniConfig.IsLoggedIn)
         {
+            ActivateSection("vod", VodFrame, typeof(VodPage));
             _initialVodRestoreTask = Task.CompletedTask;
             ShowWelcome(null);
             return;
         }
+        // 先注入配置再创建点播页，避免页面在空站点列表上初始化；站点配置后台同步。
+        _initialVodRestoreTask = OmniRuntime.Instance.StartAsync();
+        _initialLiveRestoreTask = OmniLive.LoadAsync();
+        ActivateSection("vod", VodFrame, typeof(VodPage));
+        CompleteSourceSetup();
+    }
 
-        // configs.json and prefs.json are recovered independently. If prefs was
-        // missing or damaged, keep using the newest persisted source instead of
-        // treating an existing installation as a first run.
-        if (!string.Equals(Setting.ConfigVod, config.Url, StringComparison.OrdinalIgnoreCase))
-            Setting.ConfigVod = config.Url;
-        _initialVodRestoreTask = LoadLatestAsync(config);
+    /// <summary>退出登录：清空会话与已注入配置，回到登录界面。</summary>
+    public void ShowLogin()
+    {
+        OmniConfig.Logout();
+        LocalSpiderEngine.Instance.Reset();
+        LocalSourceStore.Instance.Clear();
+        VodConfigService.Instance.Clear();
+        LiveConfigService.Instance.Clear();
+        _initialLiveRestoreTask = Task.CompletedTask;
+        ShowWelcome(null);
     }
 
     async Task LoadLatestAsync(ConfigRecord config)
@@ -739,70 +749,62 @@ public sealed partial class MainWindow : Window
         WelcomePanel.Visibility = Visibility.Visible;
         Nav.IsEnabled = false;
         GlobalSearch.IsEnabled = false;
-        if (string.IsNullOrEmpty(ConfigUrlBox.Text)) ConfigUrlBox.Text = Setting.ConfigVod ?? "";
-        if (string.IsNullOrEmpty(InitialLiveUrlBox.Text)) InitialLiveUrlBox.Text = Setting.ConfigLive ?? "";
+        if (string.IsNullOrEmpty(ServerBox.Text)) ServerBox.Text = OmniConfig.BaseUrl;
+        if (string.IsNullOrEmpty(UserBox.Text)) UserBox.Text = OmniConfig.UserName;
         if (!string.IsNullOrEmpty(error))
         {
             LoadErrorBar.Message = error;
             LoadErrorBar.IsOpen = true;
         }
-        DispatcherQueue.TryEnqueue(() => ConfigUrlBox.Focus(FocusState.Programmatic));
+        DispatcherQueue.TryEnqueue(() => ServerBox.Focus(FocusState.Programmatic));
     }
 
     void SetLoading(bool loading)
     {
         _sourceSetupLoading = loading;
         LoadRing.IsActive = loading;
-        LoadConfigButton.IsEnabled = !loading;
-        ConfigUrlBox.IsEnabled = !loading;
-        InitialLiveUrlBox.IsEnabled = !loading;
+        LoginButton.IsEnabled = !loading;
+        ServerBox.IsEnabled = !loading;
+        UserBox.IsEnabled = !loading;
+        PassBox.IsEnabled = !loading;
     }
 
-    void OnLoadConfig(object sender, RoutedEventArgs e)
-    {
-        var url = (ConfigUrlBox.Text ?? "").Trim();
-        if (url.Length == 0) { ShowWelcome("请输入点播配置地址"); return; }
-        _ = LoadInitialSourcesAsync(url, (InitialLiveUrlBox.Text ?? "").Trim());
-    }
-
-    void OnConfigUrlKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
-    {
-        if (e.Key == Windows.System.VirtualKey.Enter) OnLoadConfig(sender, null);
-    }
-
-    async Task LoadInitialSourcesAsync(string vodUrl, string liveUrl)
+    async void OnLogin(object sender, RoutedEventArgs e)
     {
         if (_sourceSetupLoading) return;
+        var server = OmniConfig.Normalize(ServerBox.Text);
+        var user = (UserBox.Text ?? "").Trim();
+        var password = PassBox.Password ?? "";
+        if (server.Length == 0) { ShowWelcome("请输入服务器地址"); return; }
+        if (user.Length == 0) { ShowWelcome("请输入用户名"); return; }
+        if (password.Length == 0) { ShowWelcome("请输入密码"); return; }
+        LoadErrorBar.IsOpen = false;
         try
         {
             SetLoading(true);
-            LoadErrorBar.IsOpen = false;
-            await VodConfigService.Instance.LoadAsync(Stores.FindConfig(vodUrl, 0));
-
-            string liveError = null;
-            if (!string.IsNullOrWhiteSpace(liveUrl))
-            {
-                try { await LiveConfigService.Instance.LoadAsync(Stores.FindConfig(liveUrl, 1)); }
-                catch (Exception e) { liveError = e.Message; }
-            }
-
+            var login = await OmniApi.LoginAsync(server, user, password);
+            OmniConfig.SaveSession(server, login.UserName, login.Token, login.UserId);
+            await OmniRuntime.Instance.StartAsync();
+            _initialLiveRestoreTask = OmniLive.LoadAsync();
             CompleteSourceSetup();
-            if (!string.IsNullOrEmpty(liveError))
-            {
-                NoticeBar.Title = "直播源加载失败";
-                NoticeBar.Message = "点播源已加载，可以正常使用。直播源错误：" + liveError;
-                NoticeBar.Severity = InfoBarSeverity.Warning;
-                NoticeBar.IsOpen = true;
-            }
         }
-        catch (Exception e)
+        catch (OmniException error)
         {
-            if (!_closed) ShowWelcome(e.Message);
+            if (!_closed) ShowWelcome(error.Message);
+        }
+        catch (Exception error)
+        {
+            if (!_closed) ShowWelcome(error.Message);
         }
         finally
         {
             if (!_closed) SetLoading(false);
         }
+    }
+
+    void OnLoginKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+    {
+        if (e.Key == Windows.System.VirtualKey.Enter) OnLogin(sender, null);
     }
 
     void CompleteSourceSetup()

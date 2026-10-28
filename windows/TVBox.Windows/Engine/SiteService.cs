@@ -148,7 +148,7 @@ public static class SiteService
                 if (string.IsNullOrEmpty(result.Flag)) result.Flag = flag;
                 result.SetUrl(SourceFetch(result.UrlBean.V()));
                 SetHeader(result, site.Header);
-                result.Key = site.Key;
+                if (string.IsNullOrEmpty(result.Key)) result.Key = site.Key;
             }
             else if (!IsPush(site) && site.Type == 4)
             {

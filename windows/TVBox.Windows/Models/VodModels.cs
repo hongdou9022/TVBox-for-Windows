@@ -97,6 +97,7 @@ public class Vod
     [JsonPropertyName("vod_name")] public string Name { get; set; } = "";
     [JsonPropertyName("vod_pic")] public string Pic { get; set; } = "";
     [JsonPropertyName("vod_remarks")] public string Remarks { get; set; } = "";
+    [JsonPropertyName("vod_source_name")] public string SourceName { get; set; } = "";
     [JsonPropertyName("vod_year")] public string Year { get; set; } = "";
     [JsonPropertyName("vod_area")] public string Area { get; set; } = "";
     [JsonPropertyName("vod_director")] public string Director { get; set; } = "";

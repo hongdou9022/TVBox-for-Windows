@@ -28,6 +28,11 @@
             <TextBlock x:Name="CountText"
                        VerticalAlignment="Center"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+            <Button x:Name="FollowButton"
+                    Content="关注"
+                    VerticalAlignment="Center"
+                    Visibility="Collapsed"
+                    Click="OnShowFollows"/>
         </StackPanel>
 
         <Grid Grid.Row="1" Margin="0,8,0,0">

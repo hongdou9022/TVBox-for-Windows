@@ -286,6 +286,7 @@ public class PlayerCore : IDisposable
             }
             Fly.Config.Demuxer.FormatOpt = options;
             ApplyFormat(request.Format);
+            if (Environment.GetEnvironmentVariable("TVBOX_TEST_MUTE") == "1") Fly.Audio.Mute = true;
             Fly.Config.Video.VideoAcceleration = Setting.Flag != 0;
             Core.Logger.D(TAG, $"打开媒体 #{generation} {DescribeUrl(request.Url)}, format={request.Format ?? "auto"}, headers=[{string.Join(',', request.Headers.Keys)}]");
             Fly.OpenAsync(request.Url);
@@ -903,6 +904,7 @@ public class PlayerCore : IDisposable
         StartPositionMs = item.StartPositionMs,
         Subs = item.Subs?.ToList() ?? new List<Models.Sub>(),
         Danmaku = item.Danmaku?.ToList() ?? new List<Models.Danmaku>(),
+        Key = item.Key ?? "",
     };
 
     static string DescribeUrl(string value)
@@ -977,4 +979,5 @@ public class PlayItem
     public List<Models.Sub> Subs = new(); public Models.Drm Drm;  // ClearKey 之外 Windows 不支持 → 提示
     public long StartPositionMs;
     public List<Models.Danmaku> Danmaku = new();         // 弹幕候选（契约 §5.3：Resolve 产出含 danmaku）
+    public string Key = "";                              // 播放上下文 token（CloudTV 进度/弹幕用）
 }

@@ -274,6 +274,11 @@ public sealed partial class PlayerPage : Page, INavigationPlayback
             item.StartPositionMs = start;
             ShowLoading("起播中…", true);
             _core.Open(item);
+            if (!Setting.DanmakuLoad && !Setting.GetBool("danmaku_hint_shown"))
+            {
+                Setting.Put("danmaku_hint_shown", true);
+                ShowToast("弹幕未开启，可在设置 → 弹幕中开启");
+            }
             RefreshDanmakuSources(item);
             RefreshSubMenu(item);
             if (Setting.DanmakuLoad && item.Danmaku.Count > 0 && !string.IsNullOrEmpty(item.Danmaku[0].Url))
@@ -566,6 +571,7 @@ public sealed partial class PlayerPage : Page, INavigationPlayback
             h.Speed = _speed;
             h.Scale = _scale;
             Stores.SaveHistory(h);
+            Omni.OmniProgress.Report(_item, h.Position, h.Duration);
         }
         catch (Exception e) { Logger.E(TAG, "历史保存失败: " + e.Message); }
     }

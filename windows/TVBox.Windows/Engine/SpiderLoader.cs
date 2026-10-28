@@ -36,12 +36,14 @@ public class SpiderLoader
         api.Contains(".js?", StringComparison.OrdinalIgnoreCase) ||
         ext.EndsWith(".js", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>取点播站点爬虫（type=3）：node → NodeSpider；.js → JsSpider；其余 → SpiderNull。</summary>
+    /// <summary>取点播站点爬虫（type=3）：omni → OmniSpider；node → NodeSpider；.js → JsSpider；其余 → SpiderNull。</summary>
     public Task<Spider> GetSpider(Models.Site site)
     {
         var key = site?.Key ?? "";
         var api = site?.Api ?? "";
         var ext = site?.Ext ?? "";
+        if (string.Equals(api, "omni", StringComparison.OrdinalIgnoreCase))
+            return Task.FromResult<Spider>(Omni.OmniSpider.Instance);
         if (IsNode(api)) return GetOrCreate(key, () => CreateNode(site));
         if (IsJs(api, ext)) return GetOrCreate(key, () => CreateJs(site, ext));
         return Task.FromResult<Spider>(new SpiderNull { Site = site });

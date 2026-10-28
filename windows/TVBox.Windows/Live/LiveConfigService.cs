@@ -31,6 +31,17 @@ public class LiveConfigService
         App.Post(() => Loaded?.Invoke());
     }
 
+    /// <summary>CloudTV 登录后注入 IPTV 直播源，替代手填直播地址。</summary>
+    public void ApplyOmni(List<Models.Live> lives)
+    {
+        Config = new ConfigRecord { Url = "omni://live", Name = "CloudTV 直播" };
+        Lives = lives ?? new();
+        Home = Lives.FirstOrDefault() ?? new Models.Live();
+        Config.Home = Home.Name;
+        _syncedToVod = false;
+        App.Post(() => Loaded?.Invoke());
+    }
+
     /// <summary>Clears stale lives that came from the previous video config, preserving a manually selected source.</summary>
     public void OnVodWithoutLives()
     {

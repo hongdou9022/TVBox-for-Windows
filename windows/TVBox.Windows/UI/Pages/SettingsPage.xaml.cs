@@ -8,6 +8,7 @@ using TVBoxForWindows.Models;
 using TVBoxForWindows.Engine;
 using TVBoxForWindows.Live;
 using TVBoxForWindows.Net;
+using TVBoxForWindows.Omni;
 using TVBoxForWindows.Player;
 using TVBoxForWindows.Server;
 
@@ -20,8 +21,6 @@ public sealed partial class SettingsPage : Page
     static readonly int[] AreaValues = { 25, 50, 75, 100 };
 
     bool _updating = true; // InitializeComponent 也会触发 Slider.ValueChanged，必须从构造前就抑制
-    bool _vodConfigLoading;
-    bool _liveConfigLoading;
     readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _statusTimer;
 
     public SettingsPage()
@@ -40,7 +39,6 @@ public sealed partial class SettingsPage : Page
         Unloaded += (s, e) =>
         {
             _statusTimer.Stop();
-            CloseConfigHistoryFlyouts();
             VodConfigService.Instance.Loaded -= OnVodLoaded;
             LiveConfigService.Instance.Loaded -= OnLiveLoaded;
         };
@@ -54,10 +52,7 @@ public sealed partial class SettingsPage : Page
         NavigationPaneToggle.IsOn = App.Main.IsNavigationPaneOpen;
         SearchDisplayCombo.SelectedIndex = Math.Clamp(Setting.SearchDisplay, 0, 1);
         CloseBehaviorCombo.SelectedIndex = Setting.MinimizeToTray ? 1 : 0;
-        VodUrlBox.Text = Setting.ConfigVod;
-        LiveUrlBox.Text = Setting.ConfigLive;
-        RefreshConfigLists();
-        RefreshSiteParse();
+        RefreshOmniAccount();
         RefreshDohs();
         SpeedSlider.Value = Math.Clamp(Setting.Speed, 1, 4);
         SpeedValueText.Text = $"{SpeedSlider.Value:0.##}x";
@@ -107,18 +102,12 @@ public sealed partial class SettingsPage : Page
 
     void OnVodLoaded()
     {
-        _updating = true;
-        RefreshSiteParse();
+        RefreshOmniAccount();
         RefreshDohs();
-        VodUrlBox.Text = Setting.ConfigVod;
-        _updating = false;
-        RefreshConfigLists();
     }
 
     void OnLiveLoaded()
     {
-        LiveUrlBox.Text = Setting.ConfigLive;
-        RefreshConfigLists();
     }
 
     void ShowStatus(string msg, InfoBarSeverity severity)
@@ -130,145 +119,102 @@ public sealed partial class SettingsPage : Page
         if (severity is InfoBarSeverity.Success or InfoBarSeverity.Informational) _statusTimer.Start();
     }
 
-    // ---------- ① 配置 ----------
+    // ---------- ① CloudTV 账号 ----------
 
-    void RefreshConfigLists()
+    void RefreshOmniAccount()
     {
-        VodHistoryList.ItemsSource = Stores.GetConfigs(0);
-        LiveHistoryList.ItemsSource = Stores.GetConfigs(1);
+        OmniServerBox.Text = OmniConfig.BaseUrl;
+        OmniAccountText.Text = string.IsNullOrEmpty(OmniConfig.UserName) ? "已登录" : OmniConfig.UserName;
+        OmniConcurrencyCombo.SelectedIndex = Setting.OmniConcurrency switch
+        {
+            1 => 1,
+            2 => 2,
+            4 => 3,
+            6 => 4,
+            8 => 5,
+            _ => 0,
+        };
+        OmniSpiderWaitCombo.SelectedIndex = Setting.OmniSpiderWait switch
+        {
+            5 => 0,
+            12 => 2,
+            _ => 1,
+        };
     }
 
-    void RefreshSiteParse()
+    void OnOmniConcurrencyChanged(object sender, SelectionChangedEventArgs e)
     {
-        var svc = VodConfigService.Instance;
-        var keep = _updating;
-        _updating = true;
-        SiteCombo.ItemsSource = svc.Sites;
-        SiteCombo.SelectedItem = svc.Sites.Contains(svc.Home) ? svc.Home : null;
-        var hasParses = svc.Parses.Count > 0;
-        ParseCombo.ItemsSource = hasParses ? svc.Parses : null;
-        ParseCombo.SelectedItem = hasParses && svc.Parses.Contains(svc.Parse) ? svc.Parse : null;
-        ParseCombo.Visibility = hasParses ? Visibility.Visible : Visibility.Collapsed;
-        ParseUnavailableText.Visibility = hasParses ? Visibility.Collapsed : Visibility.Visible;
-        _updating = keep;
+        if (_updating || OmniConcurrencyCombo.SelectedIndex < 0) return;
+        Setting.OmniConcurrency = OmniConcurrencyCombo.SelectedIndex switch
+        {
+            1 => 1,
+            2 => 2,
+            3 => 4,
+            4 => 6,
+            5 => 8,
+            _ => 0,
+        };
     }
 
-    async void OnVodLoad(object sender, RoutedEventArgs e)
+    void OnOmniSpiderWaitChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_vodConfigLoading) return;
-        var url = VodUrlBox.Text?.Trim();
-        if (string.IsNullOrEmpty(url)) return;
-        CloseConfigHistoryFlyouts();
-        _vodConfigLoading = true;
-        VodLoadButton.IsEnabled = false;
+        if (_updating || OmniSpiderWaitCombo.SelectedIndex < 0) return;
+        Setting.OmniSpiderWait = OmniSpiderWaitCombo.SelectedIndex switch
+        {
+            0 => 5,
+            2 => 12,
+            _ => 8,
+        };
+    }
+
+    async void OnOmniReload(object sender, RoutedEventArgs e)
+    {
         try
         {
-            await VodConfigService.Instance.LoadAsync(Stores.FindConfig(url, 0));
-            ShowStatus("点播配置加载成功", InfoBarSeverity.Success);
+            await OmniRuntime.Instance.ReloadAsync();
+            RefreshOmniAccount();
+            ShowStatus("CloudTV 配置已重新同步", InfoBarSeverity.Success);
         }
-        catch (Exception ex) { ShowStatus("点播配置加载失败：" + ex.Message, InfoBarSeverity.Error); }
-        finally
+        catch (Exception ex)
         {
-            _vodConfigLoading = false;
-            VodLoadButton.IsEnabled = true;
-            RefreshConfigLists();
+            ShowStatus("同步失败：" + ex.Message, InfoBarSeverity.Error);
         }
     }
 
-    void OnVodUrlLostFocus(object sender, RoutedEventArgs e)
+    void OnExportLog(object sender, RoutedEventArgs e)
     {
-        if (_updating) return;
-        var url = VodUrlBox.Text?.Trim();
-        if (!string.IsNullOrEmpty(url) && !string.Equals(url, Setting.ConfigVod, StringComparison.OrdinalIgnoreCase))
-            OnVodLoad(sender, e);
-    }
-
-    void OnVodUrlKeyDown(object sender, KeyRoutedEventArgs e)
-    {
-        if (e.Key != Windows.System.VirtualKey.Enter) return;
-        e.Handled = true;
-        OnVodLoad(sender, null);
-    }
-
-    void OnVodHistoryClick(object sender, ItemClickEventArgs e)
-    {
-        if (e.ClickedItem is ConfigRecord rec) { VodUrlBox.Text = rec.Url; OnVodLoad(sender, null); }
-    }
-
-    void OnVodHistoryDelete(object sender, RoutedEventArgs e)
-    {
-        if ((sender as FrameworkElement)?.DataContext is ConfigRecord rec)
-        {
-            Stores.DeleteConfig(rec.Url, rec.Type);
-            RefreshConfigLists();
-        }
-    }
-
-    async void OnLiveLoad(object sender, RoutedEventArgs e)
-    {
-        if (_liveConfigLoading) return;
-        var url = LiveUrlBox.Text?.Trim();
-        if (string.IsNullOrEmpty(url)) return;
-        CloseConfigHistoryFlyouts();
-        _liveConfigLoading = true;
-        LiveLoadButton.IsEnabled = false;
         try
         {
-            await LiveConfigService.Instance.LoadAsync(Stores.FindConfig(url, 1));
-            ShowStatus("直播配置加载成功", InfoBarSeverity.Success);
+            var source = Path.Combine(AppPaths.Root, "app.log");
+            if (!File.Exists(source))
+            {
+                ShowStatus("暂无可导出的日志", InfoBarSeverity.Warning);
+                return;
+            }
+            var dir = Path.Combine(AppPaths.Root, "diagnostics");
+            Directory.CreateDirectory(dir);
+            var target = Path.Combine(dir, "TVBox-log-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".log");
+            File.Copy(source, target, true);
+            ShowStatus("日志已导出：" + target, InfoBarSeverity.Success);
         }
-        catch (Exception ex) { ShowStatus("直播配置加载失败：" + ex.Message, InfoBarSeverity.Error); }
-        finally
+        catch (Exception ex)
         {
-            _liveConfigLoading = false;
-            LiveLoadButton.IsEnabled = true;
-            RefreshConfigLists();
+            ShowStatus("导出失败：" + ex.Message, InfoBarSeverity.Error);
         }
     }
 
-    void OnLiveUrlLostFocus(object sender, RoutedEventArgs e)
-    {
-        if (_updating) return;
-        var url = LiveUrlBox.Text?.Trim();
-        if (!string.IsNullOrEmpty(url) && !string.Equals(url, Setting.ConfigLive, StringComparison.OrdinalIgnoreCase))
-            OnLiveLoad(sender, e);
-    }
-
-    void OnLiveUrlKeyDown(object sender, KeyRoutedEventArgs e)
-    {
-        if (e.Key != Windows.System.VirtualKey.Enter) return;
-        e.Handled = true;
-        OnLiveLoad(sender, null);
-    }
-
-    void OnLiveHistoryClick(object sender, ItemClickEventArgs e)
-    {
-        if (e.ClickedItem is ConfigRecord rec) { LiveUrlBox.Text = rec.Url; OnLiveLoad(sender, null); }
-    }
-
-    void OnLiveHistoryDelete(object sender, RoutedEventArgs e)
-    {
-        if ((sender as FrameworkElement)?.DataContext is not ConfigRecord rec) return;
-        Stores.DeleteConfig(rec.Url, rec.Type);
-        RefreshConfigLists();
-    }
-
-    void CloseConfigHistoryFlyouts()
-    {
-        VodHistoryFlyout?.Hide();
-        LiveHistoryFlyout?.Hide();
-    }
-
-    void OnSiteChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (_updating) return;
-        if (SiteCombo.SelectedItem is Site site && !site.IsEmpty) VodConfigService.Instance.SetHome(site);
-    }
-
-    void OnParseChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (_updating) return;
-        if (ParseCombo.SelectedItem is Parse parse) VodConfigService.Instance.SetParse(parse);
+    async void OnOmniLogout(object sender, RoutedEventArgs e)
+    {        var dialog = new ContentDialog
+        {
+            Title = "退出登录",
+            Content = "退出后需要重新登录 CloudTV 才能继续使用。",
+            PrimaryButtonText = "退出",
+            CloseButtonText = "取消",
+            DefaultButton = ContentDialogButton.Close,
+            XamlRoot = XamlRoot,
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        App.Main.ShowLogin();
     }
 
     // ---------- ② 播放 ----------

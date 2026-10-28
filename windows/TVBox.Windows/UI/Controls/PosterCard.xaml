@@ -28,11 +28,20 @@
                         <GradientStop Color="#B3000000" Offset="1"/>
                     </LinearGradientBrush>
                 </Border.Background>
-                <TextBlock x:Name="TitleText"
-                           Foreground="White"
-                           FontSize="13"
-                           TextWrapping="NoWrap"
-                           TextTrimming="CharacterEllipsis"/>
+                <StackPanel>
+                    <TextBlock x:Name="TitleText"
+                               Foreground="White"
+                               FontSize="13"
+                               TextWrapping="NoWrap"
+                               TextTrimming="CharacterEllipsis"/>
+                    <TextBlock x:Name="SourceText"
+                               Margin="0,2,0,0"
+                               Foreground="#CCFFFFFF"
+                               FontSize="10"
+                               TextWrapping="NoWrap"
+                               TextTrimming="CharacterEllipsis"
+                               Visibility="Collapsed"/>
+                </StackPanel>
             </Border>
             <!-- 右上角备注徽标 -->
             <Border x:Name="RemarkBadge"

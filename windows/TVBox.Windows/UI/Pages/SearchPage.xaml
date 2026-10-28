@@ -10,14 +10,16 @@
             <controls:PosterCard Margin="6"
                                  Pic="{Binding Pic}"
                                  Title="{Binding Title}"
-                                 Remark="{Binding Remark}"/>
+                                 Remark="{Binding Remark}"
+                                 Source="{Binding SourceName}"/>
         </DataTemplate>
         <DataTemplate x:Key="GroupedCardTemplate">
             <Button Background="Transparent" BorderThickness="0" Padding="0" Click="OnGroupedResultClick">
                 <controls:PosterCard Margin="6"
                                      Pic="{Binding Pic}"
                                      Title="{Binding Title}"
-                                     Remark="{Binding Remark}"/>
+                                     Remark="{Binding Remark}"
+                                     Source="{Binding SourceName}"/>
             </Button>
         </DataTemplate>
     </Page.Resources>
@@ -30,6 +32,7 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
         <Grid>
@@ -158,6 +161,14 @@
                 </DataTemplate>
             </ListView.ItemTemplate>
         </ListView>
+
+        <Button x:Name="LoadMoreButton"
+                Grid.Row="6"
+                Content="加载更多"
+                HorizontalAlignment="Center"
+                Margin="0,4,0,12"
+                Visibility="Collapsed"
+                Click="OnLoadMore"/>
 
         <TextBlock x:Name="EmptyText"
                    Grid.Row="5"

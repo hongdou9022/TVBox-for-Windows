@@ -44,6 +44,7 @@ public static class PlayResolver
             Subs = result.Subs ?? new List<Models.Sub>(),
             Danmaku = result.Danmaku ?? new List<Models.Danmaku>(),
             StartPositionMs = result.Position is > 0 ? result.Position.Value : 0,
+            Key = result.Key ?? "",
         };
     }
 

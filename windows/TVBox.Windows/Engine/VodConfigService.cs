@@ -48,6 +48,24 @@ public class VodConfigService
         await LoadCoreAsync(config, null, false);
     }
 
+    /// <summary>CloudTV 登录后注入唯一内置源，替代 TVBox 配置解析。</summary>
+    public void ApplyOmniSource(Site site, int cid = 0)
+    {
+        if (site == null) throw new ArgumentNullException(nameof(site));
+        SpiderLoader.Instance.Clear();
+        Config = new ConfigRecord { Id = cid, Url = "omni://" + site.Key, Name = site.Name, Home = site.Key };
+        Sites = new List<Site> { site };
+        Parses = new List<Parse>();
+        Flags = new List<string>();
+        Dohs = new List<Doh>();
+        Rules = new List<Rule>();
+        Wall = "";
+        Spider = "";
+        Home = site;
+        Parse = new Parse();
+        App.Post(() => Loaded?.Invoke());
+    }
+
     public async Task LoadStartupAsync(ConfigRecord config)
     {
         if (config == null || string.IsNullOrWhiteSpace(config.Url)) throw new Exception("请输入点播配置地址");
