@@ -26,8 +26,8 @@ public sealed class LocalSiteEngine
         var sites = (sources?.Sites ?? new()).Where(site => !string.IsNullOrEmpty(site?.Api)).ToList();
         if (sites.Count == 0) return new();
         var userConcurrency = Setting.GetInt("omni_concurrency");
-        var concurrency = userConcurrency > 0 ? userConcurrency : (sources.Concurrency > 0 ? sources.Concurrency : 8);
-        concurrency = Math.Clamp(concurrency, 1, 8);
+        var concurrency = userConcurrency > 0 ? userConcurrency : Math.Max(12, sources.Concurrency);
+        concurrency = Math.Clamp(concurrency, 1, 16);
         using var gate = new SemaphoreSlim(concurrency);
         var tasks = sites.Select(site => SearchSiteAsync(site, keyword, page, gate)).ToList();
         await Task.WhenAny(Task.WhenAll(tasks), Task.Delay(SearchDeadlineMs));

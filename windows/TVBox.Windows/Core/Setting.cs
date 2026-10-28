@@ -132,6 +132,6 @@ public static class Setting
     public static string ConfigVod { get => GetString("config_vod"); set => Put("config_vod", value); }
     public static string ConfigLive { get => GetString("config_live"); set => Put("config_live", value); }
     public static string ConfigWall { get => GetString("config_wall"); set => Put("config_wall", value); }
-    public static int OmniConcurrency { get => GetInt("omni_concurrency"); set => Put("omni_concurrency", Math.Clamp(value, 0, 8)); }
+    public static int OmniConcurrency { get => GetInt("omni_concurrency"); set => Put("omni_concurrency", Math.Clamp(value, 0, 16)); }
     public static int OmniSpiderWait { get => GetInt("omni_spider_wait", 8); set => Put("omni_spider_wait", Math.Clamp(value, 5, 20)); }
 }

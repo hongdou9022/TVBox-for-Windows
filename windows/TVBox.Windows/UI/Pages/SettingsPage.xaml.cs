@@ -132,6 +132,8 @@ public sealed partial class SettingsPage : Page
             4 => 3,
             6 => 4,
             8 => 5,
+            12 => 6,
+            16 => 7,
             _ => 0,
         };
         OmniSpiderWaitCombo.SelectedIndex = Setting.OmniSpiderWait switch
@@ -152,6 +154,8 @@ public sealed partial class SettingsPage : Page
             3 => 4,
             4 => 6,
             5 => 8,
+            6 => 12,
+            7 => 16,
             _ => 0,
         };
     }

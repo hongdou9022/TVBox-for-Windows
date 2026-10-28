@@ -462,39 +462,14 @@ public sealed class OmniSpider : Spider
             if (_searchCache.TryGetValue(cacheKey, out var cached) && cached.Expires > Environment.TickCount64)
                 return cached.Json;
 
-            List<OmniApi.OmniItem> items = null;
-            var pageCount = Math.Max(page, 1);
-            var total = 0;
-
-            // 服务端搜索与网页同源，优先保证速度和结果量；失败才回退本地抓取。
-            try
-            {
-                var remote = await OmniApi.SearchAsync(key, page, true);
-                if (remote.Items.Count > 0)
-                {
-                    items = AggregateItems(RankByRelevance(key, remote.Items));
-                    pageCount = Math.Max(page, remote.PageCount);
-                    total = remote.Total;
-                }
-            }
-            catch (Exception e)
-            {
-                Logger.E("OmniSpider.searchRemote", e.Message);
-            }
-
-            if (items == null || items.Count == 0)
-            {
-                var siteTask = LocalSiteEngine.Instance.SearchAsync(key, page);
-                var spiderTask = LocalSpiderEngine.Instance.SearchAsync(key, page);
-                await Task.WhenAll(siteTask, spiderTask);
-                var merged = siteTask.Result.Concat(spiderTask.Result)
-                    .GroupBy(item => item.LibraryId + "|" + item.VideoId)
-                    .Select(group => group.First())
-                    .ToList();
-                items = AggregateItems(RankByRelevance(key, merged));
-                pageCount = Math.Max(page, 1);
-                total = items.Count;
-            }
+            var siteTask = LocalSiteEngine.Instance.SearchAsync(key, page);
+            var spiderTask = LocalSpiderEngine.Instance.SearchAsync(key, page);
+            await Task.WhenAll(siteTask, spiderTask);
+            var merged = siteTask.Result.Concat(spiderTask.Result)
+                .GroupBy(item => item.LibraryId + "|" + item.VideoId)
+                .Select(group => group.First())
+                .ToList();
+            var items = AggregateItems(RankByRelevance(key, merged));
 
             var payload = new Dictionary<string, object>
             {
@@ -502,8 +477,8 @@ public sealed class OmniSpider : Spider
                     .Where(item => item != null && !string.IsNullOrEmpty(item.VideoId))
                     .Select(ToVodJson).ToList(),
                 ["page"] = page,
-                ["pagecount"] = pageCount,
-                ["total"] = total,
+                ["pagecount"] = Math.Max(page, 1),
+                ["total"] = items.Count,
             };
             var json = JsonUtil.Serialize(payload);
             _searchCache[cacheKey] = (json, Environment.TickCount64 + 5 * 60 * 1000);
@@ -609,10 +584,15 @@ public sealed class OmniSpider : Spider
 
     async Task<OmniIds.VodRef> ResolveBySearch(string title)
     {
-        var items = (await OmniApi.SearchAsync(title, 1, true)).Items ?? new();
-        var match = items.FirstOrDefault(item => item != null && !string.IsNullOrEmpty(item.VideoId) &&
-                    string.Equals((item.Title ?? "").Trim(), (title ?? "").Trim(), StringComparison.Ordinal))
-                 ?? items.FirstOrDefault(item => item != null && !string.IsNullOrEmpty(item.VideoId));
+        var siteTask = LocalSiteEngine.Instance.SearchAsync(title, 1);
+        var spiderTask = LocalSpiderEngine.Instance.SearchAsync(title, 1);
+        await Task.WhenAll(siteTask, spiderTask);
+        var items = siteTask.Result.Concat(spiderTask.Result)
+            .Where(item => item != null && !string.IsNullOrEmpty(item.VideoId))
+            .ToList();
+        var match = items.FirstOrDefault(item =>
+                        string.Equals((item.Title ?? "").Trim(), (title ?? "").Trim(), StringComparison.Ordinal))
+                    ?? items.FirstOrDefault();
         if (match == null) return null;
         return new OmniIds.VodRef(string.IsNullOrEmpty(match.SourceType) ? "spider" : match.SourceType,
             match.LibraryId, match.VideoId);
