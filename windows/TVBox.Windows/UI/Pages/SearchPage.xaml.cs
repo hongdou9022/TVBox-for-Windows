@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using TVBoxForWindows.Core;
 using TVBoxForWindows.Engine;
 using TVBoxForWindows.Omni;
+using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
@@ -19,6 +20,8 @@ public sealed partial class SearchPage : Page
 
     readonly ObservableCollection<SiteGroup> _groups = new();
     readonly List<VodItem> _allItems = new();
+    readonly HashSet<string> _resultSources = new(StringComparer.Ordinal);
+    readonly DispatcherQueueTimer _rebuildTimer;
     CancellationTokenSource _cts;
     string _lastKeyword = "";
     int _page = 1;
@@ -32,6 +35,10 @@ public sealed partial class SearchPage : Page
         InitializeComponent();
         SiteList.ItemsSource = _groups;
         GroupedResultList.ItemsSource = _groups;
+        _rebuildTimer = DispatcherQueue.CreateTimer();
+        _rebuildTimer.Interval = TimeSpan.FromMilliseconds(180);
+        _rebuildTimer.IsRepeating = false;
+        _rebuildTimer.Tick += (s, e) => RebuildGroups();
         RefreshDisplayStyle();
     }
 
@@ -41,7 +48,7 @@ public sealed partial class SearchPage : Page
         BackButton.Visibility = Frame.CanGoBack ? Visibility.Visible : Visibility.Collapsed;
         RefreshDisplayStyle();
         UpdateScope();
-        _ = LoadScopeOptionsAsync(e.NavigationMode != NavigationMode.Back);
+        _ = LoadScopeOptionsAsync();
         LoadChips();
         if (e.Parameter is string keyword && !string.IsNullOrWhiteSpace(keyword))
         {
@@ -55,11 +62,12 @@ public sealed partial class SearchPage : Page
         }
     }
 
-    async Task LoadScopeOptionsAsync(bool force)
+    async Task LoadScopeOptionsAsync()
     {
         try
         {
-            if (OmniConfig.IsLoggedIn) await LocalSourceStore.Instance.SyncAsync(force);
+            // 沿用 10 分钟配置缓存，避免每次进入搜索页都多发一次 local-sources 请求。
+            if (OmniConfig.IsLoggedIn) await LocalSourceStore.Instance.SyncAsync();
         }
         catch (Exception e) { Logger.E("SearchPage.scope", e.Message); }
 
@@ -124,12 +132,14 @@ public sealed partial class SearchPage : Page
         _cts?.Cancel();
         var cts = _cts = new CancellationTokenSource();
         _allItems.Clear();
+        _resultSources.Clear();
         _groups.Clear();
         GroupedResultList.ItemsSource = null;
         ResultGrid.ItemsSource = null;
         SiteList.Visibility = Visibility.Collapsed;
         EmptyText.Visibility = Visibility.Collapsed;
         SearchProgress.Visibility = Visibility.Visible;
+        SearchStatusText.Visibility = Visibility.Collapsed;
         CancelButton.Visibility = Visibility.Visible;
         _lastStatus = null;
         FailureButton.Visibility = Visibility.Collapsed;
@@ -153,7 +163,14 @@ public sealed partial class SearchPage : Page
                     })
                     .ToList();
                 _allItems.AddRange(items);
-                RebuildGroups();
+                foreach (var item in items) _resultSources.Add(item.SourceName ?? "");
+                if (SearchProgress.Visibility == Visibility.Visible)
+                {
+                    SearchProgress.Visibility = Visibility.Collapsed;
+                    SearchStatusText.Visibility = Visibility.Visible;
+                }
+                SearchStatusText.Text = $"已找到 {_resultSources.Count} 个来源，仍在搜索其他站点…";
+                ScheduleRebuild();
             }, cts.Token, status =>
             {
                 if (cts.IsCancellationRequested) return;
@@ -168,6 +185,7 @@ public sealed partial class SearchPage : Page
             {
                 _cts = null;
                 SearchProgress.Visibility = Visibility.Collapsed;
+                SearchStatusText.Visibility = Visibility.Collapsed;
                 CancelButton.Visibility = Visibility.Collapsed;
                 EmptyText.Visibility = _allItems.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
                 LoadMoreButton.Visibility = _allItems.Count > 0 && !_end ? Visibility.Visible : Visibility.Collapsed;
@@ -209,7 +227,7 @@ public sealed partial class SearchPage : Page
                 if (items.Count == 0) return;
                 added += items.Count;
                 _allItems.AddRange(items);
-                RebuildGroups();
+                ScheduleRebuild();
             }, cts.Token);
             _page = page;
             if (added == 0)
@@ -230,6 +248,12 @@ public sealed partial class SearchPage : Page
             LoadMoreButton.IsEnabled = !_end;
             LoadMoreButton.Visibility = _allItems.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
         }
+    }
+
+    /// <summary>结果批次到达很快时合并成一次重建，避免每来一个源都重排整页导致卡顿。</summary>
+    void ScheduleRebuild()
+    {
+        if (!_rebuildTimer.IsRunning) _rebuildTimer.Start();
     }
 
     /// <summary>按来源重建分组；多来源时额外提供“全部”（保持跨来源相关度顺序）。</summary>
@@ -324,13 +348,26 @@ public sealed partial class SearchPage : Page
     void OnResultClick(object sender, ItemClickEventArgs e)
     {
         if (e.ClickedItem is VodItem item)
+        {
+            _cts?.Cancel();
             Frame.Navigate(typeof(DetailPage), new DetailArgs { SiteKey = item.SiteKey, VodId = item.VodId, Name = item.Title });
+        }
     }
 
     void OnGroupedResultClick(object sender, RoutedEventArgs e)
     {
         if ((sender as FrameworkElement)?.DataContext is VodItem item)
+        {
+            _cts?.Cancel();
             Frame.Navigate(typeof(DetailPage), new DetailArgs { SiteKey = item.SiteKey, VodId = item.VodId, Name = item.Title });
+        }
+    }
+
+    protected override void OnNavigatedFrom(NavigationEventArgs e)
+    {
+        base.OnNavigatedFrom(e);
+        // 离开搜索页就停止剩余站点请求，避免搜索流量与海报下载拖慢播放。
+        _cts?.Cancel();
     }
 
     public void RefreshDisplayStyle()

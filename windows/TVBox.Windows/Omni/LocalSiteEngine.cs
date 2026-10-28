@@ -48,7 +48,7 @@ public sealed class LocalSiteEngine
         await gate.WaitAsync();
         try
         {
-            return (await SearchSiteCoreAsync(site, keyword, page)).Items;
+            return (await SearchSiteCoreAsync(site, keyword, page)).Items ?? new();
         }
         finally
         {
@@ -56,48 +56,60 @@ public sealed class LocalSiteEngine
         }
     }
 
-    async Task<(List<OmniApi.OmniItem> Items, string Error)> SearchSiteCoreAsync(OmniApi.OmniLocalSite site, string keyword, int page)
+    async Task<(List<OmniApi.OmniItem> Items, string Error, long LatencyMs)> SearchSiteCoreAsync(
+        OmniApi.OmniLocalSite site, string keyword, int page)
     {
         lock (_cooldown)
         {
             if (_cooldown.TryGetValue(site.Id, out var until) && until > Environment.TickCount64)
-                return (new(), "");
+                return (new(), "", 0);
         }
-        var responded = false;
-        var lastError = "";
-        foreach (var variant in SearchVariants(keyword, page))
+        // 三种 MacCMS 搜索接口并行，单站总预算仍是 3.5s；
+        // 任一接口先给出非空结果就立即返回，避免被慢接口拖住，死站也不再占用 3 倍时间。
+        var tasks = SearchVariants(keyword, page)
+            .Select(variant => SearchVariantAsync(site, variant))
+            .ToList();
+        var pending = new List<Task<(bool Responded, List<OmniApi.OmniItem> Items, string Error, long LatencyMs)>>(tasks);
+        while (pending.Count > 0)
         {
-            try
-            {
-                var json = await RequestAsync(site, variant, SearchSiteTimeoutMs);
-                if (json == null)
-                {
-                    lastError = "接口无响应";
-                    continue;
-                }
-                if (json["list"] is not JsonArray list)
-                {
-                    lastError = "返回格式异常";
-                    continue;
-                }
-                responded = true;
-                if (list.Count == 0) continue;
-                lock (_cooldown) _cooldown.Remove(site.Id);
-                return (ParseItems(site, list), "");
-            }
-            catch (Exception e)
-            {
-                lastError = DescribeError(e);
-                Logger.E(Tag, "search " + site.Name + ": " + e.Message);
-            }
+            var done = await Task.WhenAny(pending);
+            pending.Remove(done);
+            var outcome = done.Result;
+            if (!outcome.Responded || outcome.Items.Count == 0) continue;
+            lock (_cooldown) _cooldown.Remove(site.Id);
+            return (outcome.Items, "", outcome.LatencyMs);
         }
-        if (responded)
+        var outcomes = tasks.Select(task => task.Result).ToList();
+        var valid = outcomes.Where(outcome => outcome.Responded).ToList();
+        if (valid.Count > 0)
         {
             lock (_cooldown) _cooldown.Remove(site.Id);
-            return (new(), "");
+            return (new(), "", valid.Min(outcome => outcome.LatencyMs));
         }
+        var error = outcomes.Select(outcome => outcome.Error)
+            .FirstOrDefault(message => !string.IsNullOrEmpty(message)) ?? "请求失败";
         lock (_cooldown) _cooldown[site.Id] = Environment.TickCount64 + CooldownMs;
-        return (new(), string.IsNullOrEmpty(lastError) ? "请求失败" : lastError);
+        return (new(), error, 0);
+    }
+
+    async Task<(bool Responded, List<OmniApi.OmniItem> Items, string Error, long LatencyMs)> SearchVariantAsync(
+        OmniApi.OmniLocalSite site, Dictionary<string, string> variant)
+    {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            var json = await RequestAsync(site, variant, SearchSiteTimeoutMs);
+            watch.Stop();
+            if (json == null) return (false, new(), "接口无响应", 0);
+            if (json["list"] is not JsonArray list) return (false, new(), "返回格式异常", 0);
+            return (true, ParseItems(site, list), "", watch.ElapsedMilliseconds);
+        }
+        catch (Exception e)
+        {
+            watch.Stop();
+            Logger.E(Tag, "search " + site.Name + ": " + e.Message);
+            return (false, new(), DescribeError(e), 0);
+        }
     }
 
     static string DescribeError(Exception e) => e switch
@@ -200,16 +212,19 @@ public sealed class LocalSiteEngine
         var watch = System.Diagnostics.Stopwatch.StartNew();
         try
         {
-            var (items, error) = await SearchSiteCoreAsync(site, keyword, page);
+            var (items, error, latencyMs) = await SearchSiteCoreAsync(site, keyword, page);
             watch.Stop();
-            stats.Add(string.IsNullOrEmpty(error), watch.ElapsedMilliseconds);
+            var elapsed = string.IsNullOrEmpty(error) && latencyMs > 0
+                ? Math.Min(watch.ElapsedMilliseconds, latencyMs)
+                : watch.ElapsedMilliseconds;
+            stats.Add(string.IsNullOrEmpty(error), elapsed);
             if (!string.IsNullOrEmpty(error))
             {
                 OmniSourceScoreStore.Record(site.Id, site.Name, false, watch.ElapsedMilliseconds, 0, false);
                 if (!token.IsCancellationRequested) onFailure?.Invoke(site.Name, error);
                 return;
             }
-            OmniSourceScoreStore.Record(site.Id, site.Name, false, watch.ElapsedMilliseconds, items.Count, true);
+            OmniSourceScoreStore.Record(site.Id, site.Name, false, elapsed, items.Count, true);
             if (items.Count > 0)
             {
                 PutStreamCache(StreamCacheKey(site, keyword, page), items);

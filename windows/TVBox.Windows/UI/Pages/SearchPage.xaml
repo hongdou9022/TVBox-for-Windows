@@ -86,6 +86,8 @@
         <!-- 搜索中进度 + 失败源聚合入口 -->
         <StackPanel Grid.Row="3" Orientation="Horizontal" Spacing="12" Margin="0,12,0,0">
             <ProgressBar x:Name="SearchProgress" Width="240" IsIndeterminate="True" Visibility="Collapsed"/>
+            <TextBlock x:Name="SearchStatusText" VerticalAlignment="Center" Visibility="Collapsed"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
             <Button x:Name="FailureButton" Visibility="Collapsed" Click="OnShowFailures"/>
         </StackPanel>
 

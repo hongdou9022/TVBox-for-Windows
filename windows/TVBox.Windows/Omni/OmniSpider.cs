@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text;
 using TVBoxForWindows.Core;
 using TVBoxForWindows.Engine;
 using TVBoxForWindows.Models;
@@ -158,6 +160,11 @@ public sealed class OmniSpider : Spider
         var cacheKey = "douban|" + spec + "|" + page;
         if (_doubanCache.TryGetValue(cacheKey, out var cached) && cached.Expires > Environment.TickCount64)
             return cached.Json;
+        if (TryReadDoubanDisk(cacheKey, out var diskJson))
+        {
+            _doubanCache[cacheKey] = (diskJson, Environment.TickCount64 + DoubanMemoryTtlMs);
+            return diskJson;
+        }
         var parts = spec.Split(':');
         var primary = parts.Length > 0 ? parts[0] : "movie";
         var kind = parts.Length > 1 ? parts[1] : "hot";
@@ -200,7 +207,8 @@ public sealed class OmniSpider : Spider
                 ["pagecount"] = 5,
                 ["total"] = source.Count,
             });
-            _doubanCache[cacheKey] = (json, Environment.TickCount64 + 5 * 60 * 1000);
+            _doubanCache[cacheKey] = (json, Environment.TickCount64 + DoubanMemoryTtlMs);
+            WriteDoubanDisk(cacheKey, json);
             return json;
         }
         catch (Exception e)
@@ -211,6 +219,49 @@ public sealed class OmniSpider : Spider
     }
 
     static double RatingOf(OmniApi.DoubanItem item) => item?.Rating?.Value ?? 0;
+
+    static string DoubanCacheFile(string key)
+    {
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(key))).ToLowerInvariant();
+        return Path.Combine(AppPaths.Cache, "douban", hash + ".json");
+    }
+
+    static bool TryReadDoubanDisk(string key, out string json)
+    {
+        json = null;
+        try
+        {
+            var file = DoubanCacheFile(key);
+            if (!File.Exists(file)) return false;
+            if (DateTime.UtcNow - File.GetLastWriteTimeUtc(file) > TimeSpan.FromMilliseconds(DoubanDiskTtlMs))
+                return false;
+            var text = File.ReadAllText(file);
+            if (string.IsNullOrWhiteSpace(text)) return false;
+            json = text;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    static void WriteDoubanDisk(string key, string json)
+    {
+        try
+        {
+            var file = DoubanCacheFile(key);
+            var dir = Path.GetDirectoryName(file);
+            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            var tmp = file + ".tmp";
+            File.WriteAllText(tmp, json);
+            File.Move(tmp, file, true);
+        }
+        catch (Exception e)
+        {
+            Logger.E("OmniSpider.doubanCache", e.Message);
+        }
+    }
 
     // ---------------------------------------------------------------- 详情
 
@@ -495,6 +546,9 @@ public sealed class OmniSpider : Spider
             return JsonUtil.Serialize(Result.Error(e.Message));
         }
     }
+
+    const long DoubanMemoryTtlMs = 5 * 60 * 1000;
+    const long DoubanDiskTtlMs = 10 * 60 * 1000;
 
     static readonly ConcurrentDictionary<string, (string Json, long Expires)> _searchCache = new();
     static readonly ConcurrentDictionary<string, (string Json, long Expires)> _doubanCache = new();

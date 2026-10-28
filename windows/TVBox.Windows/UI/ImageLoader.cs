@@ -17,6 +17,8 @@ public static class ImageLoader
     static readonly object Gate = new();
     static readonly ConcurrentDictionary<string, LinkedListNode<(string Key, BitmapImage Image)>> Cache = new();
     static readonly LinkedList<(string Key, BitmapImage Image)> Order = new();
+    static readonly SemaphoreSlim FetchGate = new(6, 6);
+    static readonly ConcurrentDictionary<string, Lazy<Task<byte[]>>> Inflight = new();
 
     /// <summary>加载海报（必须在 UI 线程调用；BitmapImage 是 UI 对象）。失败返回 null。</summary>
     public static async Task<BitmapImage> Load(string pic)
@@ -24,7 +26,7 @@ public static class ImageLoader
         if (string.IsNullOrWhiteSpace(pic)) return null;
         pic = NormalizeLocalNodeUrl(pic.Trim());
         if (Cache.TryGetValue(pic, out var node)) { Touch(node); return node.Value.Image; }
-        var bytes = await Fetch(pic);
+        var bytes = await FetchShared(pic);
         if (bytes == null || bytes.Length == 0) return null;
         var image = await Decode(bytes);
         if (image != null) Put(pic, image);
@@ -32,6 +34,21 @@ public static class ImageLoader
     }
 
     // ---------- 下载与磁盘缓存 ----------
+
+    /// <summary>同一张海报只下载一次；全局最多 6 路并发，避免结果页几十张图同时抢占带宽。</summary>
+    static async Task<byte[]> FetchShared(string pic)
+    {
+        var lazy = Inflight.GetOrAdd(pic, key => new Lazy<Task<byte[]>>(() => FetchGated(key)));
+        try { return await lazy.Value; }
+        finally { Inflight.TryRemove(pic, out _); }
+    }
+
+    static async Task<byte[]> FetchGated(string pic)
+    {
+        await FetchGate.WaitAsync();
+        try { return await Fetch(pic); }
+        finally { FetchGate.Release(); }
+    }
 
     static async Task<byte[]> Fetch(string pic)
     {
