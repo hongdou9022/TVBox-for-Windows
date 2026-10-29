@@ -66,6 +66,7 @@ public sealed partial class PlayerPage : Page, INavigationPlayback
     readonly Microsoft.UI.Xaml.Media.SolidColorBrush _compactCornerMaskBrush =
         new(Microsoft.UI.Colors.Black);
     long _lastSaveTick;                            // 上次历史落盘（墙钟）
+    long _playStartedTick;                         // 本轮起播开始（用于耗时日志）
     long? _pendingSeekMs;
     long _pendingSeekRequestId;
     long _subtitleLoadGeneration;
@@ -251,6 +252,7 @@ public sealed partial class PlayerPage : Page, INavigationPlayback
     {
         var ep = _session.CurrentEpisode;
         if (ep == null || _core == null) return;
+        _playStartedTick = Environment.TickCount64;
         _isBuffering = false;
         SetSourceTransition(true);
         CancelPendingSeek();
@@ -266,6 +268,7 @@ public sealed partial class PlayerPage : Page, INavigationPlayback
         {
             var item = await PlayResolver.Resolve(_session.Site, _session.CurrentFlag?.Flag, ep, ct);
             if (!IsCurrentPlayRequest(cts, generation)) return;
+            Logger.D(TAG, $"resolved {ep.Name} in {Environment.TickCount64 - _playStartedTick}ms host={Core.UrlUtil.Host(item.Url)}");
             _item = item;
             long start = item.StartPositionMs;
             if (resumeMs > 0) start = Math.Max(start, resumeMs);
@@ -274,6 +277,7 @@ public sealed partial class PlayerPage : Page, INavigationPlayback
             item.StartPositionMs = start;
             ShowLoading("起播中…", true);
             _core.Open(item);
+            Logger.D(TAG, $"open-requested in {Environment.TickCount64 - _playStartedTick}ms");
             if (!Setting.DanmakuLoad && !Setting.GetBool("danmaku_hint_shown"))
             {
                 Setting.Put("danmaku_hint_shown", true);
@@ -285,6 +289,9 @@ public sealed partial class PlayerPage : Page, INavigationPlayback
                 _ = LoadDanmaku(item.Danmaku[0].Url);
             else
                 try { _danmakuEngine.Clear(); _danmaku.Unbind(); } catch { }
+            if (Setting.DanmakuLoad && _danmakuSources.Count == 0 &&
+                Omni.OmniSpider.Instance.TryGetContext(item.Key, out var danmakuContext))
+                _ = FetchDanmakuAsync(danmakuContext);
             if (showRestoreToast && resumeMs > 0) ShowToast("已恢复到 " + Fmt(resumeMs));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
@@ -328,6 +335,7 @@ public sealed partial class PlayerPage : Page, INavigationPlayback
     void OnCoreOpened()
     {
         if (_closed) return;
+        Logger.D(TAG, $"media-opened in {Environment.TickCount64 - _playStartedTick}ms");
         _isBuffering = _core?.IsBuffering == true;
         if (_isBuffering) ShowLoading("缓冲中…", true);
         else HideLoading();
@@ -1020,6 +1028,34 @@ public sealed partial class PlayerPage : Page, INavigationPlayback
         _danmaku.SetFontScale(Setting.GetInt("danmaku_size", 24) / 22.0);   // DanmakuView 基准字号 22
         _danmaku.SetSpeed(Setting.GetInt("danmaku_speed", 2) switch { 1 => 0.75, 3 => 1.5, _ => 1.0 });
         _danmaku.SetArea(Math.Clamp(Setting.GetInt("danmaku_area", 50), 10, 100) / 100.0);
+    }
+
+    /// <summary>起播后再异步拉取弹幕，不阻塞播放地址解析。</summary>
+    async Task FetchDanmakuAsync(Omni.OmniSpider.PlayContext context)
+    {
+        var generation = _playGeneration;
+        try
+        {
+            var list = await Omni.OmniApi.DanmakuAsync((context.Title + " " + context.EpisodeName).Trim());
+            if (_closed || generation != _playGeneration) return;
+            var sources = (list ?? new List<Omni.OmniApi.OmniDanmaku>())
+                .Where(d => d != null && !string.IsNullOrEmpty(d.Url))
+                .Select((d, i) => new DanmakuSourceItem
+                {
+                    Name = string.IsNullOrEmpty(d.Name) ? "弹幕 " + (i + 1) : d.Name,
+                    Url = d.Url,
+                })
+                .ToList();
+            if (sources.Count == 0) return;
+            _danmakuSources = sources;
+            DanmakuList.ItemsSource = sources;
+            DanmakuEmptyText.Visibility = Visibility.Collapsed;
+            _ = LoadDanmaku(sources[0].Url);
+        }
+        catch (Exception e)
+        {
+            Logger.E(TAG, "弹幕获取失败: " + e.Message);
+        }
     }
 
     async Task LoadDanmaku(string urlOrText)

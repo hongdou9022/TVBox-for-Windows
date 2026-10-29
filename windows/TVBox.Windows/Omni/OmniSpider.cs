@@ -397,6 +397,7 @@ public sealed class OmniSpider : Spider
     {
         var reference = OmniIds.DecodePlay(id);
         if (reference == null) throw new InvalidOperationException("无效的播放地址");
+        var watch = System.Diagnostics.Stopwatch.StartNew();
         var info = reference.SourceType == "site"
             ? await LocalSiteEngine.Instance.PlayAsync(reference.SourceType, reference.LibraryId, reference.VideoId,
                 reference.Line, reference.Episode)
@@ -404,6 +405,7 @@ public sealed class OmniSpider : Spider
                 ? await LocalSpiderEngine.Instance.PlayAsync(reference.LibraryId, reference.VideoId,
                     reference.Line, reference.Episode)
                 : null;
+        Logger.D("OmniSpider.play", $"local {reference.SourceType}/{reference.LibraryId} ok={!string.IsNullOrEmpty(info?.Url)} {watch.ElapsedMilliseconds}ms");
         info ??= await OmniApi.PlayAsync(reference.SourceType, reference.LibraryId, reference.VideoId,
             reference.Line, reference.Episode);
         if (string.IsNullOrEmpty(info?.Url) && reference.SourceType != "site")
@@ -446,24 +448,21 @@ public sealed class OmniSpider : Spider
         };
         _contexts.TryGetValue(id ?? "", out var context);
         var danmaku = (info.Danmaku ?? new()).Where(d => d != null && !string.IsNullOrEmpty(d.Url)).ToList();
-        if (danmaku.Count == 0 && context != null)
-        {
-            try
-            {
-                danmaku = (await OmniApi.DanmakuAsync((context.Title + " " + context.EpisodeName).Trim()))
-                    .Where(d => !string.IsNullOrEmpty(d.Url)).ToList();
-            }
-            catch (Exception e)
-            {
-                Logger.E("OmniSpider.danmaku", e.Message);
-            }
-        }
         if (danmaku.Count > 0)
             payload["danmaku"] = danmaku.Select(d => new { name = d.Name, url = d.Url }).ToList();
         if (context != null)
         {
-            var position = await ResumePositionAsync(context);
-            if (position > 0) payload["position"] = position;
+            // 续播位置只等 500ms：CloudTV 慢时先用本地历史起播，后台继续缓存服务端进度。
+            var resumeTask = ResumePositionAsync(context);
+            if (await Task.WhenAny(resumeTask, Task.Delay(500)) == resumeTask)
+            {
+                try
+                {
+                    var position = await resumeTask;
+                    if (position > 0) payload["position"] = position;
+                }
+                catch { }
+            }
         }
         return JsonUtil.Serialize(payload);
     }

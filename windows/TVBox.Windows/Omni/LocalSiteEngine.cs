@@ -288,10 +288,14 @@ public sealed class LocalSiteEngine
         var site = FindSite(libraryId);
         if (site == null) return null;
         var key = libraryId + "|" + videoId;
+        var watch = System.Diagnostics.Stopwatch.StartNew();
         lock (_details)
         {
             if (_details.TryGetValue(key, out var cached) && cached.Expires > Environment.TickCount64)
+            {
+                Logger.D(Tag, $"detail cache hit {site.Name}/{videoId}");
                 return cached.Detail;
+            }
         }
         try
         {
@@ -315,6 +319,7 @@ public sealed class LocalSiteEngine
                 PlaySources = ParsePlaySources(vod),
             };
             lock (_details) _details[key] = (detail, Environment.TickCount64 + DetailTtlMs);
+            Logger.D(Tag, $"detail fetch {site.Name}/{videoId} {watch.ElapsedMilliseconds}ms sources={detail.PlaySources.Count}");
             return detail;
         }
         catch (Exception e)
@@ -326,7 +331,9 @@ public sealed class LocalSiteEngine
 
     public async Task<OmniApi.OmniPlayInfo> PlayAsync(string sourceType, string libraryId, string videoId, int line, int episode)
     {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
         var detail = await DetailAsync(sourceType, libraryId, videoId);
+        Logger.D(Tag, $"play detail {libraryId}/{videoId} {watch.ElapsedMilliseconds}ms sources={detail?.PlaySources?.Count ?? -1} line={line} ep={episode}");
         if (detail?.PlaySources == null || line < 0 || line >= detail.PlaySources.Count) return null;
         var source = detail.PlaySources[line];
         if (source?.Episodes == null || episode < 0 || episode >= source.Episodes.Count) return null;

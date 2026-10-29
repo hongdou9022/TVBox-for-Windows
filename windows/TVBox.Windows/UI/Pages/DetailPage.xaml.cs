@@ -75,11 +75,14 @@ public sealed partial class DetailPage : Page
         }
         Busy.IsActive = true;
         MsgBar.IsOpen = false;
+        var watch = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             var result = await SiteService.DetailContent(site, vodId);
+            watch.Stop();
             if (loadVersion != _loadVersion || !string.Equals(_contentKey, contentKey, StringComparison.Ordinal))
                 return;
+            Logger.D("DetailPage", $"detail {site?.Name}/{vodId} {watch.ElapsedMilliseconds}ms");
             if (result.List.Count == 0)
             {
                 ShowMsg(string.IsNullOrEmpty(result.Msg) ? "没有找到内容" : result.Msg);
@@ -89,8 +92,9 @@ public sealed partial class DetailPage : Page
         }
         catch (Exception e)
         {
+            watch.Stop();
             if (loadVersion != _loadVersion) return;
-            Logger.E("DetailPage", e.Message);
+            Logger.E("DetailPage", $"detail {site?.Name}/{vodId} failed {watch.ElapsedMilliseconds}ms: {e.Message}");
             ShowMsg(e.Message);
         }
         finally
