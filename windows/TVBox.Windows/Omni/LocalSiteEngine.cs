@@ -59,11 +59,7 @@ public sealed class LocalSiteEngine
     async Task<(List<OmniApi.OmniItem> Items, string Error, long LatencyMs)> SearchSiteCoreAsync(
         OmniApi.OmniLocalSite site, string keyword, int page)
     {
-        lock (_cooldown)
-        {
-            if (_cooldown.TryGetValue(site.Id, out var until) && until > Environment.TickCount64)
-                return (new(), "", 0);
-        }
+        if (IsCooling(site.Id)) return (new(), "", 0);
         // 三种 MacCMS 搜索接口并行，单站总预算仍是 3.5s；
         // 任一接口先给出非空结果就立即返回，避免被慢接口拖住，死站也不再占用 3 倍时间。
         var tasks = SearchVariants(keyword, page)
@@ -160,7 +156,7 @@ public sealed class LocalSiteEngine
 
         var userConcurrency = Setting.GetInt("omni_concurrency");
         var serverConcurrency = LocalSourceStore.Instance.Cached?.Concurrency ?? 8;
-        var autoConcurrency = Math.Min(serverConcurrency > 0 ? serverConcurrency : 8, OmniConcurrencyTuner.Current);
+        var autoConcurrency = Math.Max(serverConcurrency > 0 ? serverConcurrency : 8, OmniConcurrencyTuner.Current);
         var concurrency = Math.Clamp(userConcurrency > 0 ? userConcurrency : autoConcurrency, 1, 16);
 
         using var windowCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -244,7 +240,8 @@ public sealed class LocalSiteEngine
     bool IsCooling(string id)
     {
         lock (_cooldown)
-            return _cooldown.TryGetValue(id, out var until) && until > Environment.TickCount64;
+            if (_cooldown.TryGetValue(id, out var until) && until > Environment.TickCount64) return true;
+        return OmniSourceScoreStore.IsCooling(id, false);
     }
 
     static string StreamCacheKey(OmniApi.OmniLocalSite site, string keyword, int page) =>

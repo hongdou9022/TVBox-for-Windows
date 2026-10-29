@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using TVBoxForWindows.Core;
 using TVBoxForWindows.Engine;
 using TVBoxForWindows.Omni;
@@ -19,9 +20,12 @@ public sealed partial class SearchPage : Page
     const int HistoryMax = 16;
 
     readonly ObservableCollection<SiteGroup> _groups = new();
+    readonly ObservableCollection<SiteGroup> _sourceGroups = new();
+    readonly Dictionary<string, SiteGroup> _groupByName = new(StringComparer.Ordinal);
     readonly List<VodItem> _allItems = new();
     readonly HashSet<string> _resultSources = new(StringComparer.Ordinal);
     readonly DispatcherQueueTimer _rebuildTimer;
+    SiteGroup _resultGroup;
     CancellationTokenSource _cts;
     string _lastKeyword = "";
     int _page = 1;
@@ -34,7 +38,7 @@ public sealed partial class SearchPage : Page
     {
         InitializeComponent();
         SiteList.ItemsSource = _groups;
-        GroupedResultList.ItemsSource = _groups;
+        GroupedResultList.ItemsSource = _sourceGroups;
         _rebuildTimer = DispatcherQueue.CreateTimer();
         _rebuildTimer.Interval = TimeSpan.FromMilliseconds(180);
         _rebuildTimer.IsRepeating = false;
@@ -134,7 +138,9 @@ public sealed partial class SearchPage : Page
         _allItems.Clear();
         _resultSources.Clear();
         _groups.Clear();
-        GroupedResultList.ItemsSource = null;
+        _sourceGroups.Clear();
+        _groupByName.Clear();
+        _resultGroup = null;
         ResultGrid.ItemsSource = null;
         SiteList.Visibility = Visibility.Collapsed;
         EmptyText.Visibility = Visibility.Collapsed;
@@ -256,10 +262,10 @@ public sealed partial class SearchPage : Page
         if (!_rebuildTimer.IsRunning) _rebuildTimer.Start();
     }
 
-    /// <summary>按来源重建分组；多来源时额外提供“全部”（保持跨来源相关度顺序）。</summary>
+    /// <summary>原地增量更新分组：不重置 ItemsSource，避免流式结果到达时整页闪烁和滚动跳回顶部。</summary>
     void RebuildGroups()
     {
-        var selected = (SiteList.SelectedItem as SiteGroup)?.SiteName;
+        if (_allItems.Count == 0) return;
         var ordered = _allItems
             .OrderBy(item => OmniSearchRank.MatchRank(_lastKeyword, item.Title))
             .ThenBy(item => OmniSearchRank.TokenHit(_lastKeyword, item.Title))
@@ -267,24 +273,75 @@ public sealed partial class SearchPage : Page
             .ThenBy(item => item.SourceName)
             .ThenBy(item => item.Title)
             .ToList();
-        var sourceGroups = ordered
+        var grouped = ordered
             .GroupBy(item => SourceGroupName(string.IsNullOrEmpty(item.SourceName) ? "CloudTV" : item.SourceName))
-            .Select(group => new SiteGroup(group.Key, group.ToList()))
+            .Select(group => (Name: group.Key, Items: group.ToList()))
             .ToList();
-        _groups.Clear();
-        if (sourceGroups.Count > 1) _groups.Add(new SiteGroup("全部", ordered));
-        foreach (var group in sourceGroups) _groups.Add(group);
-        GroupedResultList.ItemsSource = sourceGroups;
+
+        var desiredNames = grouped.Select(group => group.Name).ToHashSet(StringComparer.Ordinal);
+        foreach (var stale in _sourceGroups.Where(group => !desiredNames.Contains(group.SiteName)).ToList())
+        {
+            _sourceGroups.Remove(stale);
+            _groups.Remove(stale);
+            _groupByName.Remove(stale.SiteName);
+            if (ReferenceEquals(_resultGroup, stale)) _resultGroup = null;
+        }
+        foreach (var (name, items) in grouped)
+        {
+            if (!_groupByName.TryGetValue(name, out var group))
+            {
+                group = new SiteGroup(name);
+                _groupByName[name] = group;
+                _sourceGroups.Add(group);
+            }
+            group.SetItems(items);
+        }
+
+        var tabs = new List<SiteGroup>();
+        if (_sourceGroups.Count > 1)
+        {
+            if (!_groupByName.TryGetValue("全部", out var all))
+            {
+                all = new SiteGroup("全部");
+                _groupByName["全部"] = all;
+            }
+            all.SetItems(ordered);
+            tabs.Add(all);
+        }
+        tabs.AddRange(_sourceGroups);
+        SyncGroups(_groups, tabs);
+
         RefreshDisplayStyle();
         if (_groups.Count == 0) return;
-        var index = 0;
-        if (!string.IsNullOrEmpty(selected))
+        var selectedName = (SiteList.SelectedItem as SiteGroup)?.SiteName;
+        var index = string.IsNullOrEmpty(selectedName)
+            ? 0
+            : Math.Max(0, _groups.ToList().FindIndex(group => group.SiteName == selectedName));
+        if (SiteList.SelectedIndex != index) SiteList.SelectedIndex = index;
+        ShowGroup(_groups[index]);
+    }
+
+    static void SyncGroups(ObservableCollection<SiteGroup> target, List<SiteGroup> desired)
+    {
+        var desiredNames = desired.Select(group => group.SiteName).ToHashSet(StringComparer.Ordinal);
+        for (var i = target.Count - 1; i >= 0; i--)
+            if (!desiredNames.Contains(target[i].SiteName)) target.RemoveAt(i);
+        for (var i = 0; i < desired.Count; i++)
         {
-            var found = _groups.ToList().FindIndex(group => group.SiteName == selected);
-            if (found >= 0) index = found;
+            if (i < target.Count && ReferenceEquals(target[i], desired[i])) continue;
+            var existing = -1;
+            for (var j = i + 1; j < target.Count; j++)
+                if (ReferenceEquals(target[j], desired[i])) { existing = j; break; }
+            if (existing >= 0) target.Move(existing, i);
+            else target.Insert(i, desired[i]);
         }
-        SiteList.SelectedIndex = index;
-        ResultGrid.ItemsSource = _groups[index].Items;
+    }
+
+    void ShowGroup(SiteGroup group)
+    {
+        if (group == null || ReferenceEquals(_resultGroup, group)) return;
+        _resultGroup = group;
+        ResultGrid.ItemsSource = group.Items;
     }
 
     /// <summary>聚合卡片来源形如“豪华资源 等 6 源”，分组时按主源名归并。</summary>
@@ -380,7 +437,8 @@ public sealed partial class SearchPage : Page
 
     void OnSiteSelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        ResultGrid.ItemsSource = (SiteList.SelectedItem as SiteGroup)?.Items;
+        if (SiteList.SelectedItem is not SiteGroup group) return;
+        ShowGroup(group);
         DispatcherQueue.TryEnqueue(() => FindScrollViewer(ResultGrid)?.ChangeView(null, 0, null, true));
     }
 
@@ -438,18 +496,35 @@ public sealed partial class SearchPage : Page
     }
 }
 
-/// <summary>按站点分组的结果组（Expander DataTemplate Binding 用）。</summary>
-public class SiteGroup
+/// <summary>按站点分组的结果组（Expander DataTemplate Binding 用）；Items 原地增量更新，避免整组重建。</summary>
+public class SiteGroup : INotifyPropertyChanged
 {
-    public SiteGroup(string siteName, List<VodItem> items)
+    public SiteGroup(string siteName)
     {
         SiteName = siteName;
-        Items = items;
     }
 
     public string SiteName { get; }
-    public List<VodItem> Items { get; }
+    public ObservableCollection<VodItem> Items { get; } = new();
     public string Header => $"{SiteName}（{Items.Count}）";
+    public event PropertyChangedEventHandler PropertyChanged;
+
+    public void SetItems(IReadOnlyList<VodItem> items)
+    {
+        var desiredKeys = new HashSet<string>(items.Select(item => item.Key), StringComparer.Ordinal);
+        for (var i = Items.Count - 1; i >= 0; i--)
+            if (!desiredKeys.Contains(Items[i].Key)) Items.RemoveAt(i);
+        for (var i = 0; i < items.Count; i++)
+        {
+            if (i < Items.Count && Items[i].Key == items[i].Key) continue;
+            var existing = -1;
+            for (var j = i + 1; j < Items.Count; j++)
+                if (Items[j].Key == items[i].Key) { existing = j; break; }
+            if (existing >= 0) Items.Move(existing, i);
+            else Items.Insert(i, items[i]);
+        }
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Header)));
+    }
 }
 
 /// <summary>搜索结果卡片视图项。</summary>
@@ -464,6 +539,7 @@ public class VodItem
     public string VodId { get; set; }
     public string Action { get; set; }
     public bool FromCache { get; set; }
+    public string Key => (SiteKey ?? "") + "|" + (VodId ?? "");
     public string SourceText => FromCache && !string.IsNullOrEmpty(SourceName)
         ? SourceName + " · 缓存"
         : SourceName;

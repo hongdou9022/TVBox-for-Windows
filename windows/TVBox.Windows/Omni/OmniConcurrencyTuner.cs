@@ -5,8 +5,9 @@ namespace TVBoxForWindows.Omni;
 public static class OmniConcurrencyTuner
 {
     static readonly object Sync = new();
-    static readonly int[] Tiers = { 4, 6, 8 };
-    static int _tier = Tiers.Length - 1;
+    // 桌面端网络/CPU 余量比手机大，自动档以 12 路为基准，再按表现上下调。
+    static readonly int[] Tiers = { 6, 12, 16 };
+    static int _tier = 1;
 
     public static int Current
     {

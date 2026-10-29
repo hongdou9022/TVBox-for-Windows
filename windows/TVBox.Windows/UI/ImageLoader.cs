@@ -178,7 +178,11 @@ public static class ImageLoader
             using var stream = new InMemoryRandomAccessStream();
             await stream.WriteAsync(bytes.AsBuffer());
             stream.Seek(0);
-            var image = new BitmapImage();
+            var image = new BitmapImage
+            {
+                // 卡片最大显示 150px 宽；按 480px 解码，避免 3000×4000 原图占用几十 MB。
+                DecodePixelWidth = 480,
+            };
             await image.SetSourceAsync(stream);
             return image;
         }

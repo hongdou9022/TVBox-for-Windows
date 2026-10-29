@@ -26,3 +26,4 @@ TestResults/
 dist/
 
 dist-lite/
+dist-*/

@@ -178,7 +178,8 @@ public sealed class LocalSpiderEngine
     bool IsCooling(string id)
     {
         lock (_cooldown)
-            return _cooldown.TryGetValue(id, out var until) && until > Environment.TickCount64;
+            if (_cooldown.TryGetValue(id, out var until) && until > Environment.TickCount64) return true;
+        return OmniSourceScoreStore.IsCooling(id, true);
     }
 
     static string StreamCacheKey(OmniApi.OmniLocalSpider spider, string keyword, int page) =>
@@ -217,11 +218,7 @@ public sealed class LocalSpiderEngine
 
     async Task<(List<OmniApi.OmniItem> Items, string Error)> SearchOneOutcomeAsync(OmniApi.OmniLocalSpider spider, string keyword, int page)
     {
-        lock (_cooldown)
-        {
-            if (_cooldown.TryGetValue(spider.Id, out var until) && until > Environment.TickCount64)
-                return (new(), "");
-        }
+        if (IsCooling(spider.Id)) return (new(), "");
         try
         {
             var runtime = await RuntimeAsync(spider);

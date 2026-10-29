@@ -105,8 +105,6 @@ public sealed partial class DetailPage : Page
         _site = vod.Site ?? _site;
         HeroPanel.Visibility = Visibility.Visible;
         TitleText.Text = NameText.Text = vod.CleanName;
-        Poster.Source = vod.Pic;
-        Backdrop.Source = vod.Pic;
         MetaText.Text = Join(vod.Year, vod.Area, vod.TypeName, vod.SourceName, vod.Remarks);
         SetOptional(DirectorText, "导演：", vod.Director);
         SetOptional(ActorText, "演员：", vod.Actor);

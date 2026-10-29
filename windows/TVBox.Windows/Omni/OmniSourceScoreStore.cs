@@ -16,6 +16,7 @@ public sealed class OmniSourceScore
     [JsonPropertyName("lastLatencyMs")] public long LastLatencyMs { get; set; }
     [JsonPropertyName("lastResults")] public int LastResults { get; set; }
     [JsonPropertyName("updatedAt")] public long UpdatedAt { get; set; }
+    [JsonPropertyName("cooldownUntil")] public long CooldownUntil { get; set; }
 
     [JsonIgnore] public double EffectiveScore { get; set; }
 }
@@ -23,6 +24,7 @@ public sealed class OmniSourceScore
 public static class OmniSourceScoreStore
 {
     const int MinSamples = 3;
+    const long CooldownMs = 5 * 60 * 1000;
     static readonly object Sync = new();
     static Dictionary<string, OmniSourceScore> _scores;
     static bool _loaded;
@@ -49,6 +51,18 @@ public static class OmniSourceScoreStore
         }
     }
 
+    /// <summary>冷却跨重启保留：失败后 5 分钟内跳过该源，避免每次启动都重试一批死站。</summary>
+    public static bool IsCooling(string id, bool spider)
+    {
+        if (string.IsNullOrEmpty(id)) return false;
+        lock (Sync)
+        {
+            Load();
+            return _scores.TryGetValue(Key(id, spider), out var score) &&
+                   score.CooldownUntil > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        }
+    }
+
     public static void Record(string id, string name, bool spider, long latencyMs, int results, bool success)
     {
         if (string.IsNullOrEmpty(id)) return;
@@ -68,11 +82,16 @@ public static class OmniSourceScoreStore
                 var sample = latencyScore * 0.55 + outcomeScore * 0.45;
                 score.Score = score.Score * 0.85 + sample * 0.15;
                 score.Successes++;
+                score.CooldownUntil = 0;
             }
             else
             {
                 score.Score *= 0.85;
                 score.Failures++;
+                // 只持久化“从未成功过”的源：避免偶发失败的好源在重启后也被跳过 5 分钟。
+                score.CooldownUntil = score.Successes == 0
+                    ? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + CooldownMs
+                    : 0;
             }
             score.Samples++;
             score.LastLatencyMs = Math.Max(0, latencyMs);
@@ -100,6 +119,7 @@ public static class OmniSourceScoreStore
                     LastLatencyMs = score.LastLatencyMs,
                     LastResults = score.LastResults,
                     UpdatedAt = score.UpdatedAt,
+                    CooldownUntil = score.CooldownUntil,
                     EffectiveScore = Effective(score),
                 })
                 .OrderByDescending(score => score.EffectiveScore)
