@@ -55,7 +55,7 @@ public sealed partial class DetailPage : Page
         _site = site;
         _vodId = vodId;
         _vod = null;
-        if (!string.IsNullOrEmpty(args.Name)) TitleText.Text = args.Name;
+        TitleText.Text = "详情";
         HeroPanel.Visibility = Visibility.Collapsed;
         FlagsPanel.Visibility = Visibility.Collapsed;
         EpisodeGrid.ItemsSource = null;
@@ -104,7 +104,7 @@ public sealed partial class DetailPage : Page
         _vod = vod;
         _site = vod.Site ?? _site;
         HeroPanel.Visibility = Visibility.Visible;
-        TitleText.Text = NameText.Text = vod.CleanName;
+        NameText.Text = vod.CleanName;
         MetaText.Text = Join(vod.Year, vod.Area, vod.TypeName, vod.SourceName, vod.Remarks);
         SetOptional(DirectorText, "导演：", vod.Director);
         SetOptional(ActorText, "演员：", vod.Actor);
