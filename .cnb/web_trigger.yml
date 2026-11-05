@@ -1,0 +1,43 @@
+# 放到每个 CNB 业务仓的 .cnb/web_trigger.yml
+# CNB 要求按钮定义必须存在于本仓，不支持 include/imports，所以 4 个仓各放一份。
+# 分支固定为 sync_dev，不提供分支输入，避免误同步其它分支。
+branch:
+  - buttons:
+      - name: 手动双向同步
+        description: 只对齐 sync_dev：比较两端 SHA，谁落后就快进；分叉时拒绝覆盖并报警
+        event: web_trigger_sync
+        inputs:
+          direction:
+            type: select
+            required: true
+            default: "auto"
+            name: 同步方向
+            description: auto=自动判断谁落后；明确方向时才允许覆盖分叉
+            options:
+              - name: 自动判断（推荐）
+                value: "auto"
+              - name: CNB 到 GitHub
+                value: "to-github"
+              - name: GitHub 到 CNB
+                value: "to-cnb"
+          dry_run:
+            type: select
+            required: false
+            default: "false"
+            name: 预览模式
+            description: 只预览则不写任何一端
+            options:
+              - name: 直接执行
+                value: "false"
+              - name: 只预览不改
+                value: "true"
+          force:
+            type: switch
+            required: false
+            default: "false"
+            name: 允许覆盖分叉
+            description: 危险。仅在方向明确时生效，用 --force-with-lease 保护
+
+      - name: 同步体检（只读）
+        description: 列出两端全部分支差异，不写任何一端
+        event: web_trigger_verify

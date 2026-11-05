@@ -1,0 +1,38 @@
+# 放到每个 CNB 业务仓根目录（4 个仓内容完全相同）
+# 只有网页按钮(web_trigger)会触发同步；push 事件不触发，因此不存在自动互推死循环。
+# 同步逻辑 .cnb/sync.sh、映射表 .cnb/repos.conf 都随仓库走，不依赖额外模板仓。
+# 密钥从私有密钥仓 floatedcloud/secrets 通过 imports 注入（allow_slugs 只放行这 4 个仓）。
+# 约定：日常只同步 sync_dev 一条分支；「同步体检」按钮做全量只读比对。
+# 用 CNB 默认构建镜像（含 git + bash）；若镜像没有 git-lfs，脚本会跳过 LFS 补齐并提示，
+# BoxWindows 的 LFS 对象在本地跑一次 ./sync.sh --repo BoxWindows 即可补齐。
+
+$:
+  web_trigger_sync:
+    - imports:
+        - https://cnb.cool/floatedcloud/secrets/-/blob/main/git/github.yml
+      stages:
+        - name: 手动双向同步
+          script: |
+            set -euo pipefail
+            export SYNC_CONF=/workspace/.cnb/repos.conf
+            export CNB_GROUP=floatedcloud
+            bash /workspace/.cnb/sync.sh \
+              --repo-slug "${CNB_REPO_SLUG}" \
+              --branch sync_dev \
+              --direction "${direction:-auto}" \
+              --dry-run "${dry_run:-false}" \
+              --force "${force:-false}" \
+              --tags false
+
+  web_trigger_verify:
+    - imports:
+        - https://cnb.cool/floatedcloud/secrets/-/blob/main/git/github.yml
+      stages:
+        - name: 同步体检（只读）
+          script: |
+            set -euo pipefail
+            export SYNC_CONF=/workspace/.cnb/repos.conf
+            export CNB_GROUP=floatedcloud
+            bash /workspace/.cnb/sync.sh \
+              --repo-slug "${CNB_REPO_SLUG}" \
+              --branch all --direction auto --dry-run true --tags false
